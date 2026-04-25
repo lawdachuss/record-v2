@@ -109,6 +109,23 @@ func FetchStream(ctx context.Context, client *internal.Req, username string) (*S
 	if server.Config.Debug {
 		fmt.Printf("[DEBUG] API response for %s: room_status=%s hls_source=%v\n", username, resp.RoomStatus, resp.HLSSource != "")
 	}
+	
+	// Always log when hls_source is empty but we expect the channel to be live
+	// This helps debug why public streams are detected as private/offline
+	if resp.HLSSource == "" {
+		fmt.Printf("[INFO] %s: No HLS source in API response (room_status=%s, code=%s)\n", username, resp.RoomStatus, resp.Code)
+		if resp.RoomStatus == "" {
+			fmt.Printf("[INFO] %s: Empty room_status might indicate API access issue\n", username)
+			// Log first 500 chars of response for debugging
+			if len(body) > 0 {
+				preview := body
+				if len(preview) > 500 {
+					preview = preview[:500] + "..."
+				}
+				fmt.Printf("[DEBUG] API response body: %s\n", preview)
+			}
+		}
+	}
 
 	// Always populate static metadata so the caller can update it even when offline.
 	meta := &Stream{

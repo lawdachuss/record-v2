@@ -54,16 +54,24 @@ func RefreshCookiesWithFlareSolverr(ctx context.Context) error {
 		return fmt.Errorf("no cf_clearance cookie received from FlareSolverr")
 	}
 
-	// CRITICAL: Update BOTH cookie AND User-Agent
-	// Cloudflare ties the cookie to the User-Agent that was used to get it
-	server.Config.Cookies = fmt.Sprintf("cf_clearance=%s", cfClearance)
+	// Build complete cookie string with ALL cookies from FlareSolverr
+	// Chaturbate needs more than just cf_clearance to access HLS sources
+	var cookiePairs []string
+	for name, value := range cookies {
+		cookiePairs = append(cookiePairs, fmt.Sprintf("%s=%s", name, value))
+	}
+	
+	// CRITICAL: Update BOTH cookies AND User-Agent
+	// Cloudflare ties the cookies to the User-Agent that was used to get them
+	server.Config.Cookies = strings.Join(cookiePairs, "; ")
 	server.Config.UserAgent = userAgent
 	
 	log.Println("✅ Successfully refreshed Cloudflare cookies!")
 	log.Printf("   New cf_clearance: %s...", cfClearance[:50])
+	log.Printf("   Total cookies received: %d", len(cookies))
+	log.Printf("   Cookie names: %v", getCookieNames(cookies))
 	log.Printf("   User-Agent: %s...", userAgent[:80])
-	log.Println("   ⚠️  IMPORTANT: Cookie and User-Agent must match (Cloudflare requirement)")
-	log.Println("   These credentials are valid for this GitHub Actions runner's IP")
+	log.Println("   These cookies are valid for this GitHub Actions runner's IP")
 
 	return nil
 }
@@ -151,4 +159,13 @@ func ShouldRefreshCookies() bool {
 
 	// Always refresh on startup in GitHub Actions
 	return true
+}
+
+// getCookieNames returns a list of cookie names for logging
+func getCookieNames(cookies map[string]string) []string {
+	names := make([]string, 0, len(cookies))
+	for name := range cookies {
+		names = append(names, name)
+	}
+	return names
 }
