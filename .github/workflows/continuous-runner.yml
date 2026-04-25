@@ -139,9 +139,12 @@ jobs:
           # Use cookies from GitHub Secrets if available, otherwise use empty string
           COOKIES="${CHATURBATE_COOKIES:-}"
           
-          # Escape special characters in cookies for JSON
-          # Replace backslashes, quotes, and other special characters
-          COOKIES_ESCAPED=$(echo "$COOKIES" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g')
+          # Auto-fix: Add cf_clearance= prefix if missing
+          # This allows users to paste just the cookie value without the prefix
+          if [ -n "$COOKIES" ] && [[ ! "$COOKIES" == *"cf_clearance="* ]]; then
+            echo "ℹ️  Auto-fixing: Adding cf_clearance= prefix to cookie value"
+            COOKIES="cf_clearance=${COOKIES}"
+          fi
           
           # Use jq to create properly formatted JSON (handles escaping automatically)
           jq -n \
