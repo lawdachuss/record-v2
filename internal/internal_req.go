@@ -10,46 +10,82 @@ import (
 	"strings"
 	"time"
 
+	cycletls "github.com/Danny-Dasilva/CycleTLS/cycletls"
 	"github.com/HeapOfChaos/goondvr/server"
 )
 
 // Req represents an HTTP client with customized settings.
 type Req struct {
-	client  *http.Client
-	isMedia bool   // when true, omits browser-spoofing headers not needed for CDN media requests
-	referer string // CDN Referer/Origin override; only used when isMedia is true
+	client     *http.Client
+	cycleTLS   cycletls.CycleTLS // TLS fingerprint spoofing client for GitHub Actions
+	useCycle   bool              // when true, use CycleTLS instead of standard http.Client
+	isMedia    bool              // when true, omits browser-spoofing headers not needed for CDN media requests
+	referer    string            // CDN Referer/Origin override; only used when isMedia is true
 }
 
 // NewReq creates a new HTTP client for Chaturbate page requests.
 func NewReq() *Req {
-	return &Req{
+	// Check if we should use CycleTLS (GitHub Actions mode with FlareSolverr)
+	useCycleTLS := os.Getenv("USE_FLARESOLVERR") == "true"
+	
+	req := &Req{
 		client: &http.Client{
 			Transport: CreateTransport(),
 		},
+		useCycle: useCycleTLS,
 	}
+	
+	// Initialize CycleTLS if needed
+	if useCycleTLS {
+		req.cycleTLS = cycletls.Init()
+	}
+	
+	return req
 }
 
 // NewMediaReq creates a new HTTP client for CDN media requests (playlists, segments).
 // It omits headers like X-Requested-With that are only needed for Chaturbate page fetches.
 func NewMediaReq() *Req {
-	return &Req{
+	// Check if we should use CycleTLS (GitHub Actions mode with FlareSolverr)
+	useCycleTLS := os.Getenv("USE_FLARESOLVERR") == "true"
+	
+	req := &Req{
 		client: &http.Client{
 			Transport: CreateTransport(),
 		},
-		isMedia: true,
+		isMedia:  true,
+		useCycle: useCycleTLS,
 	}
+	
+	// Initialize CycleTLS if needed
+	if useCycleTLS {
+		req.cycleTLS = cycletls.Init()
+	}
+	
+	return req
 }
 
 // NewMediaReqWithReferer creates a media HTTP client that sends the given URL as
 // Referer and Origin instead of the Chaturbate defaults. Use this for non-Chaturbate CDNs.
 func NewMediaReqWithReferer(referer string) *Req {
-	return &Req{
+	// Check if we should use CycleTLS (GitHub Actions mode with FlareSolverr)
+	useCycleTLS := os.Getenv("USE_FLARESOLVERR") == "true"
+	
+	req := &Req{
 		client: &http.Client{
 			Transport: CreateTransport(),
 		},
-		isMedia: true,
-		referer: referer,
+		isMedia:  true,
+		referer:  referer,
+		useCycle: useCycleTLS,
 	}
+	
+	// Initialize CycleTLS if needed
+	if useCycleTLS {
+		req.cycleTLS = cycletls.Init()
+	}
+	
+	return req
 }
 
 // CreateTransport initializes a custom HTTP transport.
@@ -82,6 +118,12 @@ func (h *Req) Get(ctx context.Context, url string) (string, error) {
 
 // GetBytes sends an HTTP GET request and returns the response as a byte slice.
 func (h *Req) GetBytes(ctx context.Context, url string) ([]byte, error) {
+	// Use CycleTLS if enabled (GitHub Actions mode)
+	if h.useCycle {
+		return h.GetBytesWithCycleTLS(ctx, url)
+	}
+	
+	// Standard HTTP client path
 	req, cancel, err := h.CreateRequest(ctx, url)
 	if err != nil {
 		return nil, fmt.Errorf("new request: %w", err)
@@ -218,4 +260,81 @@ func ParseCookies(cookieStr string) map[string]string {
 		}
 	}
 	return cookies
+}
+
+// GetBytesWithCycleTLS sends an HTTP GET request using CycleTLS to spoof browser TLS fingerprint.
+// This bypasses Cloudflare's TLS fingerprint detection in GitHub Actions.
+func (h *Req) GetBytesWithCycleTLS(ctx context.Context, url string) ([]byte, error) {
+	// Build headers map
+	headers := make(map[string]string)
+	
+	if h.isMedia {
+		ref := h.referer
+		if ref == "" {
+			ref = "https://chaturbate.com/"
+		}
+		headers["Referer"] = ref
+		headers["Origin"] = strings.TrimRight(ref, "/")
+	} else {
+		headers["X-Requested-With"] = "XMLHttpRequest"
+	}
+	
+	if server.Config.UserAgent != "" {
+		headers["User-Agent"] = server.Config.UserAgent
+	}
+	
+	// Add cookies
+	if server.Config.Cookies != "" {
+		headers["Cookie"] = server.Config.Cookies
+	}
+	
+	// Make request with CycleTLS using Chrome 120 profile
+	// This spoofs Chrome's TLS/HTTP2 fingerprint to bypass Cloudflare
+	response, err := h.cycleTLS.Do(url, cycletls.Options{
+		Body:      "",
+		Ja3:       "771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53,0-23-65281-10-11-35-16-5-13-18-51-45-43-27-17513,29-23-24,0",
+		UserAgent: server.Config.UserAgent,
+		Headers:   headers,
+		Timeout:   10,
+	}, "GET")
+	
+	if err != nil {
+		return nil, fmt.Errorf("cycletls request: %w", err)
+	}
+	
+	if server.Config.Debug && response.Status >= 400 {
+		fmt.Printf("[DEBUG] HTTP %d: %s\n", response.Status, url)
+	}
+	
+	if response.Status == http.StatusNotFound {
+		return nil, ErrNotFound
+	}
+	
+	body := []byte(response.Body)
+	
+	// Check for Cloudflare protection
+	if strings.Contains(response.Body, "<title>Just a moment...</title>") {
+		if server.Config.Debug {
+			fmt.Printf("[DEBUG] CF response for %s (status %d)\n", url, response.Status)
+			tmpFile, ferr := os.CreateTemp("", "chaturbate-debug-cf-*.html")
+			if ferr == nil {
+				if _, werr := tmpFile.Write(body); werr == nil {
+					fmt.Printf("[DEBUG]   Full body written to: %s\n", tmpFile.Name())
+				}
+				tmpFile.Close()
+			}
+		}
+		return nil, ErrCloudflareBlocked
+	}
+	
+	// Check for Age Verification
+	if strings.Contains(response.Body, "Verify your age") {
+		return nil, ErrAgeVerification
+	}
+	
+	if response.Status == http.StatusForbidden {
+		return nil, fmt.Errorf("forbidden: %w", ErrPrivateStream)
+	}
+	
+	return body, nil
 }
