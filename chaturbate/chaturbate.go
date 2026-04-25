@@ -98,7 +98,9 @@ func FetchStream(ctx context.Context, client *internal.Req, username string) (*S
 	fmt.Printf("[DEBUG] %s: Visiting homepage to establish session: %s\n", username, homeURL)
 	_, err := client.Get(ctx, homeURL)
 	if err != nil {
-		fmt.Printf("[WARN] %s: Homepage visit failed: %v\n", username, err)
+		// Homepage visit can fail with age verification, but that's OK
+		// The cookies should handle it
+		fmt.Printf("[DEBUG] %s: Homepage visit had issue (continuing): %v\n", username, err)
 	} else {
 		fmt.Printf("[DEBUG] %s: Homepage visit successful\n", username)
 	}
@@ -121,6 +123,7 @@ func FetchStream(ctx context.Context, client *internal.Req, username string) (*S
 	fmt.Printf("[DEBUG] %s: Calling API: %s\n", username, apiURL)
 	body, err := client.Get(ctx, apiURL)
 	if err != nil {
+		fmt.Printf("[ERROR] %s: API call failed: %v\n", username, err)
 		return nil, fmt.Errorf("failed to get stream info: %w", err)
 	}
 	
@@ -129,7 +132,7 @@ func FetchStream(ctx context.Context, client *internal.Req, username string) (*S
 	var resp apiResponse
 	if err := json.Unmarshal([]byte(body), &resp); err != nil {
 		fmt.Printf("[ERROR] %s: Failed to parse API response: %v\n", username, err)
-		fmt.Printf("[ERROR] %s: Raw response: %s\n", username, body)
+		fmt.Printf("[ERROR] %s: Raw response (first 500 chars): %s\n", username, truncate(body, 500))
 		return nil, fmt.Errorf("failed to parse stream info: %w", err)
 	}
 	
@@ -1084,4 +1087,13 @@ func (p *Playlist) watchMuxedSegments(ctx context.Context, handler WatchHandler)
 
 		<-time.After(1 * time.Second)
 	}
+}
+
+
+// truncate returns the first n characters of s, or s if len(s) <= n
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
 }
