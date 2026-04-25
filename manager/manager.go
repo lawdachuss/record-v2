@@ -143,6 +143,7 @@ func SaveSettings() error {
 func LoadSettings() error {
 	b, err := os.ReadFile(settingsFile)
 	if os.IsNotExist(err) {
+		fmt.Println("No settings file found, using defaults")
 		return nil
 	}
 	if err != nil {
@@ -154,9 +155,20 @@ func LoadSettings() error {
 	}
 	if s.Cookies != "" {
 		server.Config.Cookies = s.Cookies
+		// Log that cookies were loaded (show first 50 chars only)
+		cookiePreview := s.Cookies
+		if len(cookiePreview) > 50 {
+			cookiePreview = cookiePreview[:50] + "..."
+		}
+		fmt.Printf("✅ Loaded cookies from settings.json: %s\n", cookiePreview)
+	} else {
+		fmt.Println("⚠️  No cookies found in settings.json")
 	}
 	if s.UserAgent != "" {
 		server.Config.UserAgent = s.UserAgent
+		fmt.Printf("✅ Loaded user-agent from settings.json: %s\n", s.UserAgent[:50]+"...")
+	} else {
+		fmt.Println("⚠️  No user-agent found in settings.json")
 	}
 	server.Config.NtfyURL = s.NtfyURL
 	server.Config.NtfyTopic = s.NtfyTopic
