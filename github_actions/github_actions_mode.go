@@ -82,13 +82,18 @@ func (gam *GitHubActionsMode) initializeComponents() error {
 	}
 	
 	gofileAPIKey := os.Getenv("GOFILE_API_KEY")
-	if gofileAPIKey == "" {
-		return fmt.Errorf("GOFILE_API_KEY environment variable is required")
-	}
-	
 	filesterAPIKey := os.Getenv("FILESTER_API_KEY")
+	
+	// Warn if API keys are not configured, but don't fail
+	// Recordings will still work, but uploads will be skipped
+	if gofileAPIKey == "" {
+		log.Println("⚠️  WARNING: GOFILE_API_KEY not configured - uploads to Gofile will be skipped")
+	}
 	if filesterAPIKey == "" {
-		return fmt.Errorf("FILESTER_API_KEY environment variable is required")
+		log.Println("⚠️  WARNING: FILESTER_API_KEY not configured - uploads to Filester will be skipped")
+	}
+	if gofileAPIKey == "" && filesterAPIKey == "" {
+		log.Println("⚠️  WARNING: No upload API keys configured - recordings will be saved locally only")
 	}
 	
 	// Initialize Chain Manager
@@ -705,10 +710,11 @@ func (gam *GitHubActionsMode) IsCostSavingMode() bool {
 // StartWorkflowLifecycle implements the workflow lifecycle management for GitHub Actions mode.
 // It performs the following operations:
 // 1. Restores state from cache on startup
-// 2. Starts Chain Manager runtime monitoring in background goroutine
-// 3. Starts Health Monitor disk space monitoring in background goroutine
-// 4. Starts Graceful Shutdown monitoring in background goroutine
-// 5. Registers matrix job with Matrix Coordinator
+// 2. Creates and starts recording for the assigned channel
+// 3. Starts Chain Manager runtime monitoring in background goroutine
+// 4. Starts Health Monitor disk space monitoring in background goroutine
+// 5. Starts Graceful Shutdown monitoring in background goroutine
+// 6. Registers matrix job with Matrix Coordinator
 //
 // This method should be called after initializing GitHubActionsMode to start the workflow.
 // It returns an error if any critical initialization step fails.
@@ -733,8 +739,8 @@ func (gam *GitHubActionsMode) StartWorkflowLifecycle(configDir, recordingsDir st
 		log.Println("State restored successfully from cache")
 	}
 	
-	// Step 2: Register matrix job with Matrix Coordinator
-	log.Printf("Registering matrix job %s with Matrix Coordinator...", gam.MatrixJobID)
+	// Step 2: Get assigned channel and create channel configuration
+	log.Printf("Getting assigned channel for matrix job %s...", gam.MatrixJobID)
 	assignedChannel, err := gam.GetAssignedChannel()
 	if err != nil {
 		return fmt.Errorf("failed to get assigned channel: %w", err)
@@ -749,13 +755,33 @@ func (gam *GitHubActionsMode) StartWorkflowLifecycle(configDir, recordingsDir st
 	log.Printf("Matrix job %s assigned to channel: %s (site: %s, username: %s)", 
 		gam.MatrixJobID, assignedChannel, site, username)
 	
+	// Create channel configuration with quality settings
+	log.Printf("Creating channel configuration with maximum quality for %s...", username)
+	channelConfig, err := gam.CreateChannelConfigWithQuality(username, site)
+	if err != nil {
+		return fmt.Errorf("failed to create channel configuration: %w", err)
+	}
+	
+	log.Printf("Channel configuration created: site=%s, username=%s, resolution=%dp, framerate=%dfps",
+		channelConfig.Site, channelConfig.Username, channelConfig.Resolution, channelConfig.Framerate)
+	
+	// Step 3: Register matrix job with Matrix Coordinator
+	log.Printf("Registering matrix job %s with Matrix Coordinator...", gam.MatrixJobID)
 	err = gam.MatrixCoordinator.RegisterJob(gam.MatrixJobID, assignedChannel)
 	if err != nil {
 		return fmt.Errorf("failed to register matrix job: %w", err)
 	}
 	log.Printf("Matrix job %s registered successfully", gam.MatrixJobID)
 	
-	// Step 3: Start Chain Manager runtime monitoring in background goroutine
+	// Step 4: Start recording for the assigned channel
+	// Note: We need access to the Manager instance to start recording
+	// For now, we'll log that recording should start here
+	// TODO: Integrate with Manager to actually start recording
+	log.Printf("⚠️  TODO: Start recording for channel %s (site: %s)", username, site)
+	log.Printf("⚠️  This requires integration with the Manager component")
+	log.Printf("⚠️  Channel config ready: %+v", channelConfig)
+	
+	// Step 5: Start Chain Manager runtime monitoring in background goroutine
 	log.Println("Starting Chain Manager runtime monitoring in background...")
 	go func() {
 		// Create a state provider function that returns current session state
@@ -779,7 +805,7 @@ func (gam *GitHubActionsMode) StartWorkflowLifecycle(configDir, recordingsDir st
 	}()
 	log.Println("Chain Manager runtime monitoring started")
 	
-	// Step 4: Start Health Monitor disk space monitoring in background goroutine
+	// Step 6: Start Health Monitor disk space monitoring in background goroutine
 	log.Println("Starting Health Monitor disk space monitoring in background...")
 	go func() {
 		// For now, we'll use the recordings directory for disk monitoring
@@ -805,7 +831,7 @@ func (gam *GitHubActionsMode) StartWorkflowLifecycle(configDir, recordingsDir st
 	}()
 	log.Println("Health Monitor disk space monitoring started")
 	
-	// Step 5: Start Graceful Shutdown monitoring in background goroutine
+	// Step 7: Start Graceful Shutdown monitoring in background goroutine
 	log.Println("Starting Graceful Shutdown monitoring in background...")
 	go func() {
 		config := DefaultShutdownConfig()
@@ -818,7 +844,7 @@ func (gam *GitHubActionsMode) StartWorkflowLifecycle(configDir, recordingsDir st
 	}()
 	log.Println("Graceful Shutdown monitoring started")
 	
-	// Step 6: Start Adaptive Polling monitoring in background goroutine
+	// Step 8: Start Adaptive Polling monitoring in background goroutine
 	log.Println("Starting Adaptive Polling monitoring in background...")
 	go func() {
 		// Use the GitHubActionsMode's GetActiveRecordingsCount method

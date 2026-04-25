@@ -675,12 +675,18 @@ func (su *StorageUploader) UploadRecording(ctx context.Context, filePath string)
 	}
 	log.Printf("File size: %d bytes, checksum: %s", fileInfo.Size(), checksum)
 
-	// Get Gofile server first (needed for upload)
-	server, err := su.GetGofileServer(ctx)
-	if err != nil {
-		log.Printf("Failed to get Gofile server: %v", err)
-		// Continue with Filester only
-		server = ""
+	// Get Gofile server first (needed for upload) - skip if API key not configured
+	server := ""
+	if su.gofileAPIKey != "" {
+		var err error
+		server, err = su.GetGofileServer(ctx)
+		if err != nil {
+			log.Printf("Failed to get Gofile server: %v", err)
+			// Continue with Filester only
+			server = ""
+		}
+	} else {
+		log.Printf("Skipping Gofile server retrieval - API key not configured")
 	}
 
 	// Create channels to receive results from goroutines
@@ -696,6 +702,11 @@ func (su *StorageUploader) UploadRecording(ctx context.Context, filePath string)
 
 	// Launch Gofile upload goroutine with retry logic
 	go func() {
+		if su.gofileAPIKey == "" {
+			log.Printf("Skipping Gofile upload - API key not configured")
+			gofileChan <- uploadResponse{service: "Gofile", err: fmt.Errorf("Gofile API key not configured")}
+			return
+		}
 		if server == "" {
 			gofileChan <- uploadResponse{service: "Gofile", err: fmt.Errorf("no Gofile server available")}
 			return
@@ -713,6 +724,12 @@ func (su *StorageUploader) UploadRecording(ctx context.Context, filePath string)
 
 	// Launch Filester upload goroutine with retry logic
 	go func() {
+		if su.filesterAPIKey == "" {
+			log.Printf("Skipping Filester upload - API key not configured")
+			filesterChan <- uploadResponse{service: "Filester", err: fmt.Errorf("Filester API key not configured")}
+			return
+		}
+		
 		log.Printf("Starting Filester upload in goroutine with retry logic")
 		url, chunks, err := su.UploadToFilesterWithSplit(ctx, filePath)
 		if err != nil {
