@@ -2,27 +2,6 @@ name: GoondVR Continuous Runner
 
 on:
   workflow_dispatch:
-    inputs:
-      session_state:
-        description: 'Session state from previous run (JSON)'
-        required: false
-        type: string
-        default: ''
-      channels:
-        description: 'Comma-separated list of channels to record (or leave empty to use .github/workflows/channels.txt)'
-        required: false
-        type: string
-        default: ''
-      matrix_job_count:
-        description: 'Number of parallel matrix jobs (1-20)'
-        required: false
-        type: string
-        default: '5'
-      cost_saving:
-        description: 'Enable cost-saving mode (10-minute polling, limit to 2 concurrent channels)'
-        required: false
-        type: boolean
-        default: false
 
 jobs:
   validate:
@@ -36,42 +15,32 @@ jobs:
       - name: Validate inputs
         id: validate
         run: |
-          # Validate matrix_job_count is between 1 and 20
-          MATRIX_COUNT="${{ inputs.matrix_job_count }}"
-          if ! [[ "$MATRIX_COUNT" =~ ^[0-9]+$ ]]; then
-            echo "Error: matrix_job_count must be a number"
-            exit 1
-          fi
-          if [ "$MATRIX_COUNT" -lt 1 ] || [ "$MATRIX_COUNT" -gt 20 ]; then
-            echo "Error: matrix_job_count must be between 1 and 20"
-            exit 1
-          fi
-          
-          # In cost-saving mode, limit matrix_job_count to 2
-          if [ "${{ inputs.cost_saving }}" = "true" ]; then
-            if [ "$MATRIX_COUNT" -gt 2 ]; then
-              echo "Warning: Cost-saving mode enabled, limiting matrix jobs to 2 (requested: $MATRIX_COUNT)"
-              MATRIX_COUNT=2
-            fi
-            echo "Cost-saving mode ENABLED: 10-minute polling, max 2 concurrent channels"
-          fi
-          
-          # Validate channels input or read from .github/workflows/channels.txt
-          CHANNELS_LIST="${{ inputs.channels }}"
-          if [ -z "$CHANNELS_LIST" ]; then
-            if [ -f ".github/workflows/channels.txt" ]; then
-              echo "Reading channels from .github/workflows/channels.txt..."
-              # Read non-empty lines that don't start with # and join with commas
-              CHANNELS_LIST=$(grep -v '^[[:space:]]*#' .github/workflows/channels.txt | grep -v '^[[:space:]]*$' | tr -d '\r' | paste -sd "," -)
-            fi
+          # Read channels from .github/workflows/channels.txt
+          if [ -f ".github/workflows/channels.txt" ]; then
+            echo "Reading channels from .github/workflows/channels.txt..."
+            # Read non-empty lines that don't start with # and join with commas
+            CHANNELS_LIST=$(grep -v '^[[:space:]]*#' .github/workflows/channels.txt | grep -v '^[[:space:]]*$' | tr -d '\r' | paste -sd "," -)
           fi
           
           if [ -z "$CHANNELS_LIST" ]; then
-            echo "Error: No channels provided via input or .github/workflows/channels.txt"
+            echo "Error: No channels found in .github/workflows/channels.txt"
+            echo "Please add channels to .github/workflows/channels.txt"
             exit 1
           fi
           
-          echo "Validation passed: $MATRIX_COUNT matrix jobs for channels: $CHANNELS_LIST"
+          # Count number of channels
+          CHANNEL_COUNT=$(echo "$CHANNELS_LIST" | tr ',' '\n' | wc -l)
+          
+          # Set matrix count to match channel count (max 20)
+          if [ "$CHANNEL_COUNT" -gt 20 ]; then
+            echo "Warning: Found $CHANNEL_COUNT channels, limiting to 20 (GitHub Actions max)"
+            MATRIX_COUNT=20
+          else
+            MATRIX_COUNT=$CHANNEL_COUNT
+          fi
+          
+          echo "✅ Validation passed: $MATRIX_COUNT matrix jobs for $CHANNEL_COUNT channels"
+          echo "Channels: $CHANNELS_LIST"
           echo "validated_matrix_count=$MATRIX_COUNT" >> $GITHUB_OUTPUT
           echo "resolved_channels=$CHANNELS_LIST" >> $GITHUB_OUTPUT
       
@@ -140,7 +109,6 @@ jobs:
             ./partial
           key: state-${{ needs.validate.outputs.session_id }}-job-${{ matrix.job_id }}
           restore-keys: |
-            state-${{ inputs.session_state }}-job-${{ matrix.job_id }}
             state-latest-job-${{ matrix.job_id }}
       
       - name: Setup Go
@@ -183,8 +151,7 @@ jobs:
           MATRIX_JOB_COUNT: ${{ steps.validate.outputs.validated_matrix_count }}
           SESSION_ID: ${{ needs.validate.outputs.session_id }}
           CHANNELS: ${{ needs.validate.outputs.channels }}
-          SESSION_STATE: ${{ inputs.session_state }}
-          COST_SAVING: ${{ inputs.cost_saving }}
+          COST_SAVING: false
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_RUN_ID: ${{ github.run_id }}
         run: |
@@ -192,7 +159,6 @@ jobs:
           echo "Session ID: $SESSION_ID"
           echo "Matrix Job ID: $MATRIX_JOB_ID"
           echo "Channels: $CHANNELS"
-          echo "Cost-saving mode: $COST_SAVING"
           
           # TODO: Implement GitHub Actions mode in main.go
           # This will be implemented in subsequent tasks
@@ -272,20 +238,12 @@ jobs:
           echo "## GoondVR Continuous Runner Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Session ID:** ${{ needs.validate.outputs.session_id }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Matrix Jobs:** ${{ steps.validate.outputs.validated_matrix_count }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Matrix Jobs:** ${{ needs.validate.outputs.validated_matrix_count }}" >> $GITHUB_STEP_SUMMARY
           echo "**Channels:** ${{ needs.validate.outputs.channels }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Cost-Saving Mode:** ${{ inputs.cost_saving }}" >> $GITHUB_STEP_SUMMARY
           echo "**Status:** ${{ needs.record.result }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          
-          if [ "${{ inputs.cost_saving }}" = "true" ]; then
-            echo "### Cost-Saving Mode Active" >> $GITHUB_STEP_SUMMARY
-            echo "- Polling frequency: 10 minutes" >> $GITHUB_STEP_SUMMARY
-            echo "- Concurrent recordings: Limited to 2 channels" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-          fi
-          
-          echo "### Next Steps" >> $GITHUB_STEP_SUMMARY
-          echo "- The auto-restart chain will be implemented in subsequent tasks" >> $GITHUB_STEP_SUMMARY
-          echo "- Recording functionality will be added in Task 2" >> $GITHUB_STEP_SUMMARY
-          echo "- Upload functionality will be added in Task 3" >> $GITHUB_STEP_SUMMARY
+          echo "### System Features" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Maximum quality enabled (up to 4K 60fps)" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Dual upload to Gofile and Filester" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Auto-restart every 5.5 hours" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ State persistence across runs" >> $GITHUB_STEP_SUMMARY
