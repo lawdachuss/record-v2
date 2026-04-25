@@ -1,201 +1,99 @@
-# GoondVR GitHub Actions Continuous Runner
+# GitHub Actions Continuous Runner
 
-This workflow enables 24/7 recording of Chaturbate and Stripchat streams using GitHub Actions.
+## ⚠️ Cloudflare Blocking Issue
 
-## Quick Start
+**Problem:** GitHub Actions runners use datacenter IP addresses that Cloudflare actively blocks, even with valid cookies.
 
-1. **Add channels to record** - Edit `.github/workflows/channels.txt`
-2. **Configure secrets** (optional but recommended) - See below
-3. **Run workflow** - Go to Actions tab → GoondVR Continuous Runner → Run workflow
-
-## Configuration
-
-### Required Files
-
-- **channels.txt** - List of channels to record (one per line)
-  ```
-  # Format: site:username OR just username (defaults to chaturbate)
-  chaturbate:alice
-  stripchat:bob
-  charlie
-  ```
-
-### GitHub Secrets (Optional but Recommended)
-
-Go to **Settings → Secrets and variables → Actions** and add:
-
-#### 1. Cloudflare Bypass (Highly Recommended)
-
-**`CHATURBATE_COOKIES`** - Required to bypass Cloudflare protection
-
-**How to get cookies:**
-
-1. Open Chrome/Firefox and go to https://chaturbate.com
-2. Open Developer Tools (F12)
-3. Go to **Network** tab
-4. Refresh the page
-5. Click on any request to chaturbate.com
-6. Find the **Cookie** header in Request Headers
-7. Copy the entire cookie string
-
-**Example cookie format:**
+**Symptoms:**
 ```
-affid=12345; __cf_bm=abc123...; cf_clearance=xyz789...; csrftoken=token123
+INFO [channel] channel was blocked by Cloudflare (cookies configured); retrying in 10s
 ```
 
-**Important Notes:**
-- Cookies expire after ~24 hours - you'll need to update them regularly
-- Without cookies, Cloudflare will block most requests
-- The workflow will show warnings if cookies are not configured
+This happens repeatedly because:
+1. GitHub Actions IPs are known datacenter addresses
+2. Cloudflare blocks datacenter IPs regardless of cookies
+3. Cookies expire quickly (30 min - 2 hours)
 
-#### 2. Upload Services (Optional)
+## 🔧 Solutions
 
-**`GOFILE_API_KEY`** - For uploading to Gofile.io
-- Get your API key from https://gofile.io/myProfile
+### Option 1: Use a Residential Proxy (Recommended)
 
-**`FILESTER_API_KEY`** - For uploading to Filester
-- Get your API key from https://filester.me/account
+Add a residential proxy to bypass Cloudflare:
 
-**Without upload keys:**
-- Recordings are saved locally in the workflow
-- Files are uploaded to GitHub Artifacts on failure
-- You can download from Artifacts section (7-day retention)
+1. Get a residential proxy service (e.g., Bright Data, Smartproxy, Oxylabs)
+2. Add the proxy URL to GitHub Secrets:
+   - Name: `HTTPS_PROXY`
+   - Value: `http://username:password@proxy.example.com:8080`
+   
+3. The workflow will automatically use it
 
-#### 3. Notifications (Optional)
+### Option 2: Use a Self-Hosted Runner
 
-**`DISCORD_WEBHOOK_URL`** - Discord notifications
-- Create webhook in Discord Server Settings → Integrations
+Run the workflow on your own machine:
 
-**`NTFY_TOKEN`** - Ntfy.sh notifications (optional)
-- Get token from https://ntfy.sh
+1. Go to: Settings → Actions → Runners → New self-hosted runner
+2. Follow the setup instructions
+3. Your home IP is less likely to be blocked
 
-## How It Works
+### Option 3: Reduce Polling Frequency
 
-### Workflow Lifecycle
+The workflow now uses `--interval 5` (5 minutes) instead of 1 minute to reduce request frequency and avoid triggering rate limits.
 
-1. **Validation** - Reads channels.txt and validates configuration
-2. **Matrix Jobs** - Creates one job per channel (max 20 parallel)
-3. **Recording** - Each job:
-   - Checks if channel is online every 1 minute
-   - Records when online (maximum quality up to 4K 60fps)
-   - Saves to `./videos/` directory
-   - Uploads to Gofile and Filester (if API keys configured)
-   - Stores metadata in `database/` folder
-4. **Auto-Restart** - After 5.5 hours, gracefully shuts down and triggers next run
-5. **Continuous** - Runs 24/7 with automatic restarts
+## 📋 Required Secrets
 
-### Recording Quality
+| Secret Name | Description | Required |
+|------------|-------------|----------|
+| `CHATURBATE_COOKIES` | `cf_clearance=...` from browser | ✅ Yes |
+| `HTTPS_PROXY` | Residential proxy URL | ⚠️ Recommended |
+| `GOFILE_API_KEY` | Gofile upload API key | Optional |
+| `FILESTER_API_KEY` | Filester upload API key | Optional |
+| `DISCORD_WEBHOOK_URL` | Discord notifications | Optional |
+| `NTFY_TOKEN` | Ntfy notifications | Optional |
 
-- **Always maximum quality** - Up to 4K 60fps
-- **Automatic fallback** - 2160p60 → 1080p60 → 720p60 → highest available
-- **No configuration needed** - Quality selection is automatic
+## 🍪 Getting Fresh Cookies
 
-### Database Structure
+Cookies expire quickly. To get fresh ones:
 
-Uploaded video links are stored in JSON files:
+1. Open Chrome in **Incognito mode**
+2. Go to `https://chaturbate.com`
+3. Complete Cloudflare challenge
+4. Press F12 → Application → Cookies → chaturbate.com
+5. Copy `cf_clearance` value
+6. Update GitHub Secret immediately
+7. Run workflow within 30 minutes
 
-```
-database/
-├── chaturbate/
-│   ├── username1/
-│   │   └── 2026-04-26.json
-│   └── username2/
-│       └── 2026-04-26.json
-└── stripchat/
-    └── username3/
-        └── 2026-04-26.json
-```
+## 🔍 Debugging
 
-Each JSON file contains:
-```json
-[
-  {
-    "timestamp": "2026-04-26T14:30:00Z",
-    "duration_seconds": 3600,
-    "file_size_bytes": 2147483648,
-    "quality": "2160p60",
-    "gofile_url": "https://gofile.io/d/abc123",
-    "filester_url": "https://filester.me/file/xyz789",
-    "session_id": "run-20260426-143000-12345",
-    "matrix_job": "1"
-  }
-]
+Check the workflow logs for:
+
+```bash
+✅ Configured Chaturbate cookies from GitHub Secrets
+✅ Cookie contains cf_clearance (Cloudflare bypass)
 ```
 
-## Troubleshooting
-
-### Cloudflare Blocking
-
-**Error:** `channel was blocked by Cloudflare`
-
-**Solution:**
-1. Add `CHATURBATE_COOKIES` secret (see above)
-2. Update cookies every 24 hours
-3. Use a browser extension to export cookies automatically
-
-### Cache Errors
-
-**Warning:** `Cache save failed` or `tar failed with exit code 2`
-
-**Solution:** These warnings are harmless and can be ignored. The workflow uses `continue-on-error` to prevent failures.
-
-### No Recordings
-
-**Check:**
-1. Is the channel online? The workflow only records when streams are live
-2. Are cookies configured? Cloudflare may block without valid cookies
-3. Check workflow logs for specific errors
-
-### Upload Failures
-
-**If uploads fail:**
-- Recordings are saved to GitHub Artifacts
-- Download from Actions → Workflow Run → Artifacts section
-- Artifacts are kept for 7 days
-
-## Advanced Configuration
-
-### Cost-Saving Mode
-
-To reduce GitHub Actions minutes usage, you can enable cost-saving mode in the workflow file:
-
-```yaml
-env:
-  COST_SAVING: true  # Change from false to true
+If you see:
+```bash
+❌ ERROR: CHATURBATE_COOKIES secret not configured
 ```
 
-This will:
-- Reduce polling interval to 10 minutes (instead of 1 minute)
-- Limit concurrent recordings to 2 channels
+Then the secret is missing or empty.
 
-### Custom Polling Interval
-
-Edit the workflow file to change polling frequency:
-
-```yaml
-env:
-  POLLING_INTERVAL: "5m"  # Check every 5 minutes instead of 1
+If you see:
+```bash
+⚠️ WARNING: Cookie does not contain cf_clearance
 ```
 
-## Limitations
+Then your cookie format is wrong. It should be:
+```
+cf_clearance=YOUR_LONG_VALUE_HERE
+```
 
-- **GitHub Actions limits:**
-  - 6 hours maximum per job (workflow restarts automatically)
-  - 20 concurrent jobs maximum
-  - 2000 minutes/month on free plan
+## 💡 Why This Happens
 
-- **Storage:**
-  - Recordings are uploaded to external services (Gofile/Filester)
-  - Local storage is temporary (cleared after upload)
-  - GitHub Artifacts: 7-day retention, 500MB per artifact
+Chaturbate uses Cloudflare to protect against bots and scrapers. Cloudflare:
+- Blocks known datacenter IPs (like GitHub Actions)
+- Requires browser-like behavior
+- Expires cookies quickly
+- Detects automated access patterns
 
-## Support
-
-For issues or questions:
-1. Check workflow logs in Actions tab
-2. Review this README
-3. Open an issue on GitHub
-
-## License
-
-This project is open source. See LICENSE file for details.
+**Bottom line:** GitHub Actions is not ideal for this use case. Consider running locally or using a self-hosted runner.

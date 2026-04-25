@@ -204,18 +204,28 @@ jobs:
           COST_SAVING: false
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_RUN_ID: ${{ github.run_id }}
+          HTTPS_PROXY: ${{ secrets.HTTPS_PROXY }}
         run: |
           echo "Starting GoondVR in GitHub Actions mode"
           echo "Session ID: $SESSION_ID"
           echo "Matrix Job ID: $MATRIX_JOB_ID"
           echo "Channels: $CHANNELS"
           
+          # Check if proxy is configured
+          if [ -n "$HTTPS_PROXY" ]; then
+            echo "✅ Using proxy: ${HTTPS_PROXY:0:30}..."
+          else
+            echo "⚠️  No proxy configured - GitHub Actions IPs may be blocked by Cloudflare"
+            echo "   Consider adding HTTPS_PROXY secret with a residential proxy"
+          fi
+          
           # Start recording with GitHub Actions mode
           go run main.go \
             --mode github-actions \
             --matrix-job-id $MATRIX_JOB_ID \
             --session-id $SESSION_ID \
-            --channels "$CHANNELS"
+            --channels "$CHANNELS" \
+            --interval 5
       
       - name: Save shared configuration cache
         if: always()
