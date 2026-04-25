@@ -151,6 +151,8 @@ jobs:
             echo "⚠️  See README for instructions on obtaining cookies"
           else
             echo "✅ Configured Chaturbate cookies from GitHub Secrets"
+            # Show first 50 characters of cookies for verification (don't show full cookies in logs)
+            echo "   Cookie preview: ${COOKIES:0:50}..."
           fi
           
           echo "Created settings.json with Cloudflare bypass configuration"
