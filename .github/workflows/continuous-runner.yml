@@ -75,6 +75,15 @@ jobs:
       fail-fast: false  # Continue other jobs even if one fails
       max-parallel: 20  # Allow up to 20 concurrent jobs
     
+    services:
+      flaresolverr:
+        image: ghcr.io/flaresolverr/flaresolverr:latest
+        ports:
+          - 8191:8191
+        env:
+          LOG_LEVEL: info
+          HEADLESS: true
+    
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -237,18 +246,21 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_RUN_ID: ${{ github.run_id }}
           HTTPS_PROXY: ${{ secrets.HTTPS_PROXY }}
+          USE_FLARESOLVERR: true
+          FLARESOLVERR_URL: http://localhost:8191/v1
         run: |
           echo "Starting GoondVR in GitHub Actions mode"
           echo "Session ID: $SESSION_ID"
           echo "Matrix Job ID: $MATRIX_JOB_ID"
           echo "Channels: $CHANNELS"
           
+          # Check if FlareSolverr is running
+          echo "✅ FlareSolverr proxy enabled at http://localhost:8191"
+          echo "   This will bypass Cloudflare protection using a real Chrome browser"
+          
           # Check if proxy is configured
           if [ -n "$HTTPS_PROXY" ]; then
             echo "✅ Using proxy: ${HTTPS_PROXY:0:30}..."
-          else
-            echo "⚠️  No proxy configured - GitHub Actions IPs may be blocked by Cloudflare"
-            echo "   Consider adding HTTPS_PROXY secret with a residential proxy"
           fi
           
           # Start recording with GitHub Actions mode
