@@ -91,6 +91,21 @@ type apiResponse struct {
 }
 
 func FetchStream(ctx context.Context, client *internal.Req, username string) (*Stream, error) {
+	// IMPORTANT: Visit the room page first to establish session
+	// Chaturbate's API may require this to return hls_source for public streams
+	// This mimics what a real browser does (visit page, then API calls happen)
+	roomURL := fmt.Sprintf("%s%s/", server.Config.Domain, username)
+	if server.Config.Debug {
+		fmt.Printf("[DEBUG] Pre-warming session by visiting room page: %s\n", roomURL)
+	}
+	_, err := client.Get(ctx, roomURL)
+	if err != nil {
+		// Don't fail if room page visit fails, try API anyway
+		if server.Config.Debug {
+			fmt.Printf("[DEBUG] Room page visit failed (continuing anyway): %v\n", err)
+		}
+	}
+	
 	apiURL := fmt.Sprintf("%sapi/chatvideocontext/%s/", server.Config.Domain, username)
 	body, err := client.Get(ctx, apiURL)
 	if err != nil {
@@ -124,6 +139,14 @@ func FetchStream(ctx context.Context, client *internal.Req, username string) (*S
 				}
 				fmt.Printf("[DEBUG] API response body: %s\n", preview)
 			}
+		}
+		
+		// CRITICAL: If room_status is "public" but hls_source is empty,
+		// this means we're hitting an age gate or need authentication
+		if resp.RoomStatus == "public" {
+			fmt.Printf("[WARN] %s: Room is PUBLIC but no HLS source - likely age verification required\n", username)
+			fmt.Printf("[WARN] %s: Try visiting https://chaturbate.com/%s/ in browser and copying ALL cookies\n", username, username)
+			return nil, internal.ErrAgeVerification
 		}
 	}
 
