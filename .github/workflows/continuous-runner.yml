@@ -128,9 +128,32 @@ jobs:
           echo "Dependencies installed successfully"
       
       - name: Initialize state
+        env:
+          CHATURBATE_COOKIES: ${{ secrets.CHATURBATE_COOKIES }}
         run: |
           # Create necessary directories
           mkdir -p ./conf ./videos ./state ./partial ./database
+          
+          # Create settings.json with cookies and user-agent to bypass Cloudflare
+          # Use cookies from GitHub Secrets if available, otherwise use empty string
+          COOKIES="${CHATURBATE_COOKIES:-}"
+          
+          cat > ./conf/settings.json << EOF
+          {
+            "cookies": "${COOKIES}",
+            "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+          }
+          EOF
+          
+          if [ -z "$COOKIES" ]; then
+            echo "⚠️  WARNING: CHATURBATE_COOKIES secret not configured"
+            echo "⚠️  Cloudflare may block requests without valid cookies"
+            echo "⚠️  See README for instructions on obtaining cookies"
+          else
+            echo "✅ Configured Chaturbate cookies from GitHub Secrets"
+          fi
+          
+          echo "Created settings.json with Cloudflare bypass configuration"
           
           # Log cache restoration status
           echo "Shared config cache hit: ${{ steps.restore_shared_config.outputs.cache-hit }}"
