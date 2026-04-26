@@ -67,10 +67,18 @@ type ShutdownConfig struct {
 }
 
 // DefaultShutdownConfig returns the default shutdown configuration.
+// 
+// BUG 1 FIX: Adjusted timeline to prevent race condition with chain trigger:
+//   5.3 hours: Chain trigger (ChainManager)
+//   5.4 hours: Graceful shutdown begins (this config)
+//   5.5 hours: Hard timeout
+// 
+// This ensures the chain trigger completes before shutdown begins, preventing gaps.
+// 
 // Requirements: 7.1, 7.3, 7.7
 func DefaultShutdownConfig() ShutdownConfig {
 	return ShutdownConfig{
-		ShutdownThreshold:    5*time.Hour + 24*time.Minute, // 5.4 hours
+		ShutdownThreshold:    5*time.Hour + 24*time.Minute, // 5.4 hours (unchanged)
 		RecordingGracePeriod: 5 * time.Minute,              // 5 minutes
 		TotalTimeout:         5*time.Hour + 30*time.Minute, // 5.5 hours
 	}

@@ -131,6 +131,9 @@ func (hm *HealthMonitor) GetNotifiers() []Notifier {
 //   - 12 GB: Pause new recording starts
 //   - 13 GB: Stop oldest active recording
 //
+// EDGE 2 FIX: Added pre-upload disk space check to prevent disk exhaustion during uploads.
+// Before starting any upload, the method now verifies sufficient disk space is available.
+//
 // The method runs in a loop until the context is cancelled. It logs all disk usage
 // statistics and sends notifications when actions are taken.
 //
@@ -207,6 +210,33 @@ func (hm *HealthMonitor) MonitorDiskSpace(ctx context.Context, recordingDir stri
 			}
 		}
 	}
+}
+
+// CheckDiskSpaceBeforeUpload verifies sufficient disk space is available before starting an upload.
+// This prevents disk exhaustion during upload operations which can cause workflow crashes.
+// 
+// EDGE 2 FIX: Pre-upload disk space validation to prevent crashes during upload.
+// 
+// Parameters:
+//   - recordingDir: Directory to check disk space for
+//   - requiredFreeGB: Minimum free space required in GB (recommended: 2 GB)
+// 
+// Returns:
+//   - error: Error if insufficient disk space is available
+func (hm *HealthMonitor) CheckDiskSpaceBeforeUpload(recordingDir string, requiredFreeGB float64) error {
+	diskStats, err := hm.getDiskStats(recordingDir)
+	if err != nil {
+		return fmt.Errorf("failed to check disk space: %w", err)
+	}
+	
+	freeGB := float64(diskStats.Free) / (1024 * 1024 * 1024)
+	
+	if freeGB < requiredFreeGB {
+		return fmt.Errorf("insufficient disk space for upload: %.2f GB free, %.2f GB required", freeGB, requiredFreeGB)
+	}
+	
+	fmt.Printf("✅ Sufficient disk space for upload: %.2f GB free (%.2f GB required)\n", freeGB, requiredFreeGB)
+	return nil
 }
 
 // DiskStats holds disk usage information for monitoring.

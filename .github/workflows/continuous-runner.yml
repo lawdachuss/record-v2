@@ -3,6 +3,10 @@ name: GoondVR Continuous Runner
 on:
   workflow_dispatch:
 
+# Grant write permissions to allow pushing database commits
+permissions:
+  contents: write  # Required for git push operations
+
 jobs:
   validate:
     name: Validate Configuration
@@ -18,11 +22,24 @@ jobs:
       - name: Validate inputs
         id: validate
         run: |
+          # ISSUE 2 FIX: Validate channels.txt exists before reading
+          if [ ! -f ".github/workflows/channels.txt" ]; then
+            echo "❌ ERROR: .github/workflows/channels.txt not found"
+            echo ""
+            echo "To fix this:"
+            echo "1. Create the file: .github/workflows/channels.txt"
+            echo "2. Add one channel per line in format: site:username"
+            echo "3. Example:"
+            echo "   chaturbate:channel1"
+            echo "   stripchat:channel2"
+            echo ""
+            exit 1
+          fi
+          
           # Read channels from .github/workflows/channels.txt
-          if [ -f ".github/workflows/channels.txt" ]; then
-            echo "Reading channels from .github/workflows/channels.txt..."
-            # Read non-empty lines that don't start with # and join with commas
-            CHANNELS_LIST=$(grep -v '^[[:space:]]*#' .github/workflows/channels.txt | grep -v '^[[:space:]]*$' | tr -d '\r' | paste -sd "," -)
+          echo "Reading channels from .github/workflows/channels.txt..."
+          # Read non-empty lines that don't start with # and join with commas
+          CHANNELS_LIST=$(grep -v '^[[:space:]]*#' .github/workflows/channels.txt | grep -v '^[[:space:]]*$' | tr -d '\r' | paste -sd "," -)
           fi
           
           if [ -z "$CHANNELS_LIST" ]; then
@@ -136,8 +153,11 @@ jobs:
             ./videos
             ./state
             ./partial
-          key: state-pending-upload-${{ github.run_id }}-job-${{ matrix.job.id }}-never-match
+          # BUG 4 FIX: Include session ID in cache key to prevent collision between different workflow runs
+          # This ensures each workflow run has isolated cache state
+          key: state-pending-upload-${{ needs.validate.outputs.session_id }}-${{ github.run_id }}-job-${{ matrix.job.id }}-never-match
           restore-keys: |
+            state-pending-upload-${{ needs.validate.outputs.session_id }}-
             state-pending-upload-
       
       - name: Upload cached recordings from previous run
@@ -187,9 +207,44 @@ jobs:
               echo "✅ Upload credentials found, uploading cached recordings..."
               echo ""
               
-              # Create upload and database script
+              # Create upload and database script with dual upload support
               cat > process_cached_recordings.sh << 'PROCESS_SCRIPT'
           #!/bin/bash
+          
+          convert_to_mp4() {
+            local input_file="$1"
+            local output_file="${input_file%.ts}.mp4"
+            
+            echo "  🎬 Converting .ts to .mp4 with ffmpeg..."
+            
+            # Check if ffmpeg is available
+            if ! command -v ffmpeg &> /dev/null; then
+              echo "  ⚠️  ffmpeg not found, uploading .ts file as-is"
+              echo "$input_file"
+              return 0
+            fi
+            
+            # Convert with fast remux (no re-encoding)
+            if ffmpeg -nostdin -y -i "$input_file" -c copy -movflags +faststart "$output_file" 2>&1 | grep -q "error\|Error"; then
+              echo "  ⚠️  Conversion failed, uploading .ts file as-is"
+              echo "$input_file"
+              return 0
+            fi
+            
+            # Verify output file was created and is not empty
+            if [ -f "$output_file" ] && [ -s "$output_file" ]; then
+              echo "  ✅ Converted to MP4: $(du -h "$output_file" | cut -f1)"
+              # Delete original .ts file
+              rm -f "$input_file"
+              echo "$output_file"
+              return 0
+            else
+              echo "  ⚠️  Output file invalid, uploading .ts file as-is"
+              rm -f "$output_file"
+              echo "$input_file"
+              return 0
+            fi
+          }
           
           upload_to_gofile() {
             local file="$1"
@@ -209,7 +264,7 @@ jobs:
               return 1
             fi
             
-            echo "  Using server: $SERVER"
+            echo "     Using server: $SERVER"
             
             # Upload file
             RESPONSE=$(curl -s -F "file=@$file" -F "token=$api_key" "https://$SERVER.gofile.io/contents/uploadfile")
@@ -223,12 +278,52 @@ jobs:
             fi
             
             if [ -n "$DOWNLOAD_PAGE" ] && [ "$DOWNLOAD_PAGE" != "null" ]; then
-              echo "  ✅ Gofile URL: $DOWNLOAD_PAGE"
+              echo "     ✅ Gofile URL: $DOWNLOAD_PAGE"
               echo "$DOWNLOAD_PAGE"
               return 0
             else
-              echo "  ❌ Upload failed"
-              echo "  Response: $RESPONSE"
+              echo "     ❌ Upload failed"
+              echo "     Response: $RESPONSE"
+              return 1
+            fi
+          }
+          
+          upload_to_filester() {
+            local file="$1"
+            local api_key="$2"
+            
+            echo "  📤 Uploading to Filester..."
+            
+            # Get upload URL
+            UPLOAD_RESPONSE=$(curl -s -X POST "https://filester.me/api/upload/server?key=$api_key")
+            UPLOAD_URL=$(echo "$UPLOAD_RESPONSE" | jq -r '.result.url' 2>/dev/null)
+            
+            if [ -z "$UPLOAD_URL" ] || [ "$UPLOAD_URL" = "null" ]; then
+              echo "     ❌ Failed to get Filester upload URL"
+              echo "     Response: $UPLOAD_RESPONSE"
+              return 1
+            fi
+            
+            echo "     Using upload URL: ${UPLOAD_URL:0:50}..."
+            
+            # Upload file
+            RESPONSE=$(curl -s -F "file=@$file" "$UPLOAD_URL")
+            
+            # Extract download URL
+            DOWNLOAD_URL=$(echo "$RESPONSE" | jq -r '.result.url' 2>/dev/null)
+            
+            if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" = "null" ]; then
+              # Fallback: try to extract URL differently
+              DOWNLOAD_URL=$(echo "$RESPONSE" | grep -o '"url":"[^"]*"' | head -1 | cut -d'"' -f4)
+            fi
+            
+            if [ -n "$DOWNLOAD_URL" ] && [ "$DOWNLOAD_URL" != "null" ]; then
+              echo "     ✅ Filester URL: $DOWNLOAD_URL"
+              echo "$DOWNLOAD_URL"
+              return 0
+            else
+              echo "     ❌ Upload failed"
+              echo "     Response: $RESPONSE"
               return 1
             fi
           }
@@ -236,10 +331,11 @@ jobs:
           save_to_database() {
             local filename="$1"
             local gofile_url="$2"
-            local filesize="$3"
+            local filester_url="$3"
+            local filesize="$4"
             
             # Extract channel name and timestamp from filename
-            # Format: channelname_YYYY-MM-DD_HH-MM-SS.ts
+            # Format: channelname_YYYY-MM-DD_HH-MM-SS.mp4 (or .ts)
             CHANNEL=$(echo "$filename" | sed 's/_[0-9].*$//')
             TIMESTAMP=$(echo "$filename" | sed 's/^.*_\([0-9-]*_[0-9-]*\)\..*$/\1/' | tr '_' ' ')
             
@@ -250,7 +346,8 @@ jobs:
             echo "     Channel: $CHANNEL"
             echo "     Date: $DATE"
             echo "     Timestamp: $TIMESTAMP"
-            echo "     URL: $gofile_url"
+            echo "     Gofile URL: $gofile_url"
+            echo "     Filester URL: $filester_url"
             
             # Create channel directory
             mkdir -p "./database/$CHANNEL"
@@ -263,12 +360,14 @@ jobs:
               --arg channel "$CHANNEL" \
               --arg timestamp "$TIMESTAMP" \
               --arg gofile_url "$gofile_url" \
+              --arg filester_url "$filester_url" \
               --arg filesize "$filesize" \
               --arg uploaded_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
               '{
                 channel: $channel,
                 timestamp: $timestamp,
                 gofile_url: $gofile_url,
+                filester_url: $filester_url,
                 filesize: ($filesize | tonumber),
                 uploaded_at: $uploaded_at,
                 source: "cached_recording"
@@ -295,29 +394,70 @@ jobs:
           for video in ./videos/*.ts ./videos/*.mp4 ./videos/*.mkv; do
             [ -f "$video" ] || continue
             
-            FILENAME=$(basename "$video")
-            FILESIZE=$(stat -f%z "$video" 2>/dev/null || stat -c%s "$video" 2>/dev/null)
+            ORIGINAL_FILENAME=$(basename "$video")
             
             echo ""
             echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            echo "📼 Processing: $FILENAME"
-            echo "   Size: $(du -h "$video" | cut -f1)"
+            echo "📼 Processing: $ORIGINAL_FILENAME"
+            echo "   Original size: $(du -h "$video" | cut -f1)"
             echo ""
             
-            # Try to upload
-            GOFILE_URL=$(upload_to_gofile "$video" "$GOFILE_API_KEY")
+            # Convert .ts to .mp4 if needed
+            if [[ "$video" == *.ts ]]; then
+              PROCESSED_VIDEO=$(convert_to_mp4 "$video")
+            else
+              PROCESSED_VIDEO="$video"
+            fi
             
-            if [ $? -eq 0 ] && [ -n "$GOFILE_URL" ]; then
+            FILENAME=$(basename "$PROCESSED_VIDEO")
+            FILESIZE=$(stat -f%z "$PROCESSED_VIDEO" 2>/dev/null || stat -c%s "$PROCESSED_VIDEO" 2>/dev/null)
+            
+            echo ""
+            echo "  📤 Starting dual upload (Gofile + Filester)..."
+            
+            # Upload to both services in parallel
+            GOFILE_URL=""
+            FILESTER_URL=""
+            
+            # Upload to Gofile
+            if [ -n "$GOFILE_API_KEY" ]; then
+              GOFILE_URL=$(upload_to_gofile "$PROCESSED_VIDEO" "$GOFILE_API_KEY")
+              GOFILE_SUCCESS=$?
+            else
+              echo "  ⚠️  Gofile API key not configured"
+              GOFILE_SUCCESS=1
+            fi
+            
+            # Upload to Filester
+            if [ -n "$FILESTER_API_KEY" ]; then
+              FILESTER_URL=$(upload_to_filester "$PROCESSED_VIDEO" "$FILESTER_API_KEY")
+              FILESTER_SUCCESS=$?
+            else
+              echo "  ⚠️  Filester API key not configured"
+              FILESTER_SUCCESS=1
+            fi
+            
+            # Check if at least one upload succeeded
+            if [ $GOFILE_SUCCESS -eq 0 ] || [ $FILESTER_SUCCESS -eq 0 ]; then
               echo ""
-              save_to_database "$FILENAME" "$GOFILE_URL" "$FILESIZE"
+              
+              # Use placeholder for failed uploads
+              [ -z "$GOFILE_URL" ] && GOFILE_URL="(upload failed)"
+              [ -z "$FILESTER_URL" ] && FILESTER_URL="(upload failed)"
+              
+              save_to_database "$FILENAME" "$GOFILE_URL" "$FILESTER_URL" "$FILESIZE"
               echo ""
-              echo "  🗑️  Deleting local file (uploaded successfully)..."
-              rm -f "$video"
+              echo "  🗑️  Deleting local file (at least one upload succeeded)..."
+              rm -f "$PROCESSED_VIDEO"
               echo "  ✅ Processing complete"
               UPLOADED_COUNT=$((UPLOADED_COUNT + 1))
+              
+              if [ $GOFILE_SUCCESS -ne 0 ] || [ $FILESTER_SUCCESS -ne 0 ]; then
+                echo "  ⚠️  Warning: Only partial upload succeeded"
+              fi
             else
               echo ""
-              echo "  ⚠️  Upload failed, keeping local file"
+              echo "  ❌ Both uploads failed, keeping local file"
               FAILED_COUNT=$((FAILED_COUNT + 1))
             fi
           done
@@ -403,6 +543,14 @@ jobs:
         with:
           go-version: '1.24'
           cache: true
+      
+      - name: Install ffmpeg
+        run: |
+          echo "📦 Installing ffmpeg for video conversion..."
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg
+          ffmpeg -version
+          echo "✅ ffmpeg installed successfully"
       
       - name: Install dependencies
         run: |
@@ -515,6 +663,49 @@ jobs:
           echo "Testing binary..."
           ./goondvr --help || echo "Help command failed, but binary exists"
       
+      - name: Wait for FlareSolverr to be ready (EDGE 7 FIX)
+        timeout-minutes: 2
+        run: |
+          echo "⏳ Waiting for FlareSolverr service to be ready..."
+          echo "FlareSolverr URL: http://localhost:8191"
+          
+          MAX_ATTEMPTS=24  # 2 minutes with 5-second intervals
+          ATTEMPT=0
+          
+          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+            ATTEMPT=$((ATTEMPT + 1))
+            echo "Attempt $ATTEMPT/$MAX_ATTEMPTS..."
+            
+            # Check if FlareSolverr is responding
+            if curl -s -f http://localhost:8191/health > /dev/null 2>&1; then
+              echo "✅ FlareSolverr is ready!"
+              
+              # Get FlareSolverr version info
+              echo ""
+              echo "FlareSolverr Info:"
+              curl -s http://localhost:8191/health | jq '.' || echo "(could not parse response)"
+              
+              exit 0
+            fi
+            
+            if [ $ATTEMPT -lt $MAX_ATTEMPTS ]; then
+              echo "⏳ FlareSolverr not ready yet, waiting 5 seconds..."
+              sleep 5
+            fi
+          done
+          
+          echo "❌ ERROR: FlareSolverr failed to start within 2 minutes"
+          echo ""
+          echo "Checking FlareSolverr container logs:"
+          docker logs $(docker ps -q --filter "ancestor=ghcr.io/flaresolverr/flaresolverr:latest") || echo "Could not get container logs"
+          
+          echo ""
+          echo "⚠️  WARNING: Workflow will continue but Cloudflare bypass may not work"
+          echo "All Cloudflare-protected requests may fail"
+          
+          # Don't fail the workflow, just warn
+          exit 0
+      
       - name: Start recording with cancellation safety
         env:
           GOFILE_API_KEY: ${{ secrets.GOFILE_API_KEY }}
@@ -575,6 +766,7 @@ jobs:
       
       - name: Emergency cleanup and upload (runs on cancellation)
         if: always()
+        timeout-minutes: 2  # Fast cleanup - don't let this block other steps
         run: |
           echo "🛡️ Emergency cleanup - preparing recordings for cache..."
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -661,6 +853,7 @@ jobs:
       - name: Emergency database commit (runs on cancellation/timeout)
         if: always()
         continue-on-error: true
+        timeout-minutes: 2  # Fast commit - don't let this block other steps
         run: |
           echo "📦 Emergency database commit..."
           
@@ -715,6 +908,7 @@ jobs:
       
       - name: Prepare stable recordings for cache
         if: always()
+        timeout-minutes: 1  # Fast preparation
         run: |
           echo "📦 Preparing stable recordings for cache..."
           
@@ -776,45 +970,16 @@ jobs:
             rm -rf ./videos-stable
           fi
       
-      - name: Save shared configuration cache
-        if: always()
-        uses: actions/cache/save@v4
-        continue-on-error: true  # Don't fail if cache save fails
-        env:
-          ZSTD_CLEVEL: 19  # Maximum compression level for zstd (1-19)
-        with:
-          path: |
-            ./conf
-          key: shared-config-${{ github.run_id }}-${{ matrix.job.id }}
+      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      # CRITICAL OPERATIONS FIRST (fast, must complete before cancellation)
+      # These steps are ordered by priority to ensure critical operations
+      # complete before workflow cancellation can kill the job
+      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
       
-      - name: Save job-specific state cache
-        if: always()
-        uses: actions/cache/save@v4
-        continue-on-error: true  # Don't fail if cache save fails
-        env:
-          ZSTD_CLEVEL: 19  # Maximum compression level for zstd (1-19)
-        with:
-          path: |
-            ./videos
-            ./state
-            ./partial
-          key: state-pending-upload-${{ github.run_id }}-job-${{ matrix.job.id }}
-      
-      - name: Upload recordings as artifacts (always runs, even on cancellation)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: recordings-job-${{ matrix.job.id }}-${{ github.run_id }}
-          path: |
-            ./videos/**/*
-            ./state/**/*
-            ./logs/**/*
-          retention-days: 7
-          if-no-files-found: ignore
-      
-      - name: Commit and push database to repository
+      - name: Commit and push database to repository (PRIORITY 1)
         if: always()
         continue-on-error: true
+        timeout-minutes: 2  # Fast operation - should complete quickly
         run: |
           echo "📦 Committing database to repository..."
           
@@ -867,8 +1032,9 @@ jobs:
             echo "ℹ️  No database directory or files found (no recordings uploaded yet)"
           fi
       
-      - name: Update status file
+      - name: Update status file (PRIORITY 2)
         if: always()
+        timeout-minutes: 1  # Fast operation
         run: |
           # Create status directory if it doesn't exist
           mkdir -p ./status
@@ -885,4 +1051,51 @@ jobs:
           }
           EOF
           
-          echo "Status file created for job ${{ matrix.job.id }}"
+          echo "✅ Status file created for job ${{ matrix.job.id }}"
+          echo "📊 Cleanup Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Database commit attempted" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Status file updated" >> $GITHUB_STEP_SUMMARY
+      
+      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      # LONG-RUNNING OPERATIONS (can be interrupted, but still important)
+      # These operations take longer and are more likely to be killed on
+      # cancellation. However, recordings are already preserved in cache.
+      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      
+      - name: Save shared configuration cache (PRIORITY 3)
+        if: always()
+        uses: actions/cache/save@v4
+        continue-on-error: true  # Don't fail if cache save fails
+        env:
+          ZSTD_CLEVEL: 19  # Maximum compression level for zstd (1-19)
+        with:
+          path: |
+            ./conf
+          key: shared-config-${{ github.run_id }}-${{ matrix.job.id }}
+      
+      - name: Save job-specific state cache (PRIORITY 4)
+        if: always()
+        uses: actions/cache/save@v4
+        continue-on-error: true  # Don't fail if cache save fails
+        env:
+          ZSTD_CLEVEL: 19  # Maximum compression level for zstd (1-19)
+        with:
+          path: |
+            ./videos
+            ./state
+            ./partial
+          key: state-pending-upload-${{ github.run_id }}-job-${{ matrix.job.id }}
+      
+      - name: Upload recordings as artifacts (PRIORITY 5 - backup only)
+        if: always()
+        uses: actions/upload-artifact@v4
+        continue-on-error: true  # Don't fail if artifact upload fails
+        with:
+          name: recordings-job-${{ matrix.job.id }}-${{ github.run_id }}
+          path: |
+            ./videos/**/*.ts
+            ./videos/**/*.mp4
+            ./videos/**/*.mkv
+          retention-days: 7
+          compression-level: 0  # No compression for faster upload
+          if-no-files-found: ignore

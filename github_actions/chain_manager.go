@@ -87,6 +87,10 @@ func (cm *ChainManager) GenerateSessionID() string {
 // TriggerNextRun initiates the next workflow run via GitHub API workflow_dispatch endpoint.
 // It passes the current session state to the new workflow run using workflow inputs.
 // Retries up to 3 times with exponential backoff on transient errors.
+// 
+// EDGE 6 FIX: Validates session state size before sending to prevent API failures.
+// GitHub API has a 256 KB limit for workflow_dispatch payloads.
+// 
 // Requirements: 1.1, 1.2, 1.5, 1.6, 1.7
 func (cm *ChainManager) TriggerNextRun(ctx context.Context, state SessionState) error {
 	if cm.nextRunTriggered {
@@ -97,6 +101,30 @@ func (cm *ChainManager) TriggerNextRun(ctx context.Context, state SessionState) 
 	stateJSON, err := json.Marshal(state)
 	if err != nil {
 		return fmt.Errorf("failed to marshal session state: %w", err)
+	}
+	
+	// EDGE 6 FIX: Validate payload size before sending
+	const maxPayloadSize = 256 * 1024 // 256 KB GitHub API limit
+	if len(stateJSON) > maxPayloadSize {
+		log.Printf("WARNING: Session state too large (%d bytes, limit: %d bytes)", len(stateJSON), maxPayloadSize)
+		log.Println("Truncating partial recordings to fit within limit...")
+		
+		// Truncate partial recordings to reduce size
+		originalCount := len(state.PartialRecordings)
+		state.PartialRecordings = state.PartialRecordings[:0] // Clear partial recordings
+		
+		// Re-serialize without partial recordings
+		stateJSON, err = json.Marshal(state)
+		if err != nil {
+			return fmt.Errorf("failed to marshal truncated session state: %w", err)
+		}
+		
+		log.Printf("Truncated %d partial recordings, new size: %d bytes", originalCount, len(stateJSON))
+		
+		// If still too large, fail
+		if len(stateJSON) > maxPayloadSize {
+			return fmt.Errorf("session state still too large after truncation (%d bytes, limit: %d bytes)", len(stateJSON), maxPayloadSize)
+		}
 	}
 
 	// Build GitHub API payload
@@ -120,7 +148,7 @@ func (cm *ChainManager) TriggerNextRun(ctx context.Context, state SessionState) 
 		cm.repository, cm.workflowFile)
 
 	// Retry the GitHub API call up to 3 times with exponential backoff
-	log.Printf("Triggering next workflow run for session %s", cm.sessionID)
+	log.Printf("Triggering next workflow run for session %s (payload size: %d bytes)", cm.sessionID, len(payloadBytes))
 	err = RetryWithBackoff(ctx, 3, func() error {
 		// Create HTTP request
 		req, err := http.NewRequestWithContext(ctx, "POST", apiURL, bytes.NewReader(payloadBytes))
@@ -178,13 +206,24 @@ func (cm *ChainManager) GetStartTime() time.Time {
 }
 
 // MonitorRuntime checks elapsed time every minute and triggers the next workflow run
-// at 5.5 hours (19,800 seconds). It runs in a loop until the context is cancelled or
+// at 5.3 hours (19,080 seconds). It runs in a loop until the context is cancelled or
 // the next run is triggered.
+// 
+// BUG 1 FIX: Trigger chain at 5.3 hours instead of 5.5 hours to ensure it completes
+// before graceful shutdown begins at 5.4 hours. This prevents race conditions where
+// the chain trigger might fail during shutdown, causing recording gaps.
+// 
+// Timeline:
+//   0.0 hours: Workflow starts
+//   5.3 hours: Chain trigger (this method)
+//   5.4 hours: Graceful shutdown begins
+//   5.5 hours: Hard timeout
+// 
 // Requirements: 1.1, 1.3, 1.4
 func (cm *ChainManager) MonitorRuntime(ctx context.Context, stateProvider func() SessionState) error {
 	const (
-		checkInterval    = 1 * time.Minute  // Check every minute
-		triggerThreshold = 19800 * time.Second // 5.5 hours in seconds
+		checkInterval    = 1 * time.Minute     // Check every minute
+		triggerThreshold = 19080 * time.Second // 5.3 hours (BUG 1 FIX: was 5.5 hours)
 	)
 
 	// Check immediately on start
@@ -234,6 +273,9 @@ func (cm *ChainManager) GetElapsedTime() time.Duration {
 // RetryWithBackoff executes an operation with exponential backoff retry logic.
 // It retries up to maxAttempts times with delays of 1s, 2s, 4s between attempts.
 // All retry attempts are logged with error details.
+// 
+// EDGE 1 FIX: Added jitter to prevent thundering herd when multiple jobs retry simultaneously.
+// 
 // Requirements: 1.6, 1.7
 func RetryWithBackoff(ctx context.Context, maxAttempts int, operation func() error) error {
 	if maxAttempts <= 0 {
@@ -262,12 +304,18 @@ func RetryWithBackoff(ctx context.Context, maxAttempts int, operation func() err
 			break
 		}
 
+		// Add jitter to prevent thundering herd (EDGE 1 FIX)
+		// Jitter is a random value between 0 and 500ms
+		jitter := time.Duration(time.Now().UnixNano()%500) * time.Millisecond
+		totalDelay := delay + jitter
+		
+		log.Printf("Retrying in %v (base: %v, jitter: %v)...", totalDelay, delay, jitter)
+		
 		// Wait with exponential backoff before next attempt
-		log.Printf("Retrying in %v...", delay)
 		select {
 		case <-ctx.Done():
 			return fmt.Errorf("retry cancelled: %w", ctx.Err())
-		case <-time.After(delay):
+		case <-time.After(totalDelay):
 			// Double the delay for next iteration (1s -> 2s -> 4s)
 			delay *= 2
 		}

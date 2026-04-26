@@ -67,16 +67,15 @@ type gofileUploadResponse struct {
 // NewStorageUploader creates a new StorageUploader instance with the provided API keys.
 // The httpClient is configured with a 5-minute timeout to handle large file uploads.
 // 
-// BUG 5 FIX: Validates that API keys are not empty. Returns nil if either key is empty.
+// BUG 5 FIX: API keys are now optional - warnings are logged if missing but uploader is still created.
+// This allows the system to function even without upload capabilities (local storage only).
 func NewStorageUploader(gofileAPIKey, filesterAPIKey string) *StorageUploader {
-	// Validate API keys are not empty (BUG 5 FIX)
+	// Log warnings if API keys are missing (BUG 5 FIX)
 	if gofileAPIKey == "" {
-		log.Printf("ERROR: Gofile API key is empty - cannot create StorageUploader")
-		return nil
+		log.Printf("WARNING: Gofile API key is empty - Gofile uploads will be skipped")
 	}
 	if filesterAPIKey == "" {
-		log.Printf("ERROR: Filester API key is empty - cannot create StorageUploader")
-		return nil
+		log.Printf("WARNING: Filester API key is empty - Filester uploads will be skipped")
 	}
 	
 	return &StorageUploader{
@@ -680,21 +679,22 @@ func (su *StorageUploader) UploadRecording(ctx context.Context, filePath string)
 		return nil, fmt.Errorf("failed to stat file: %w", err)
 	}
 	
-	// Validate minimum file size (BUG 10 FIX)
-	const minFileSize = 1024 // 1 KB minimum
+	// Validate minimum file size (BUG 9 FIX - EDGE 9)
+	const minFileSize = 1024 * 1024 // 1 MB minimum to avoid uploading empty/corrupt files
 	if fileInfo.Size() < minFileSize {
+		log.Printf("WARNING: File too small (%d bytes) - minimum %d bytes required, skipping upload", fileInfo.Size(), minFileSize)
 		return nil, fmt.Errorf("file too small (%d bytes) - minimum %d bytes required", fileInfo.Size(), minFileSize)
 	}
 	
-	log.Printf("File size: %d bytes", fileInfo.Size())
+	log.Printf("File size: %d bytes (%.2f MB)", fileInfo.Size(), float64(fileInfo.Size())/(1024*1024))
 
 	// Calculate file checksum before upload for integrity verification (Requirement 3.11)
+	// BUG 8 FIX (EDGE 8): Make checksum calculation mandatory
 	checksum, err := su.CalculateFileChecksum(filePath)
 	if err != nil {
-		// Make checksum calculation mandatory (BUG 8 FIX)
 		return nil, fmt.Errorf("failed to calculate file checksum (required for integrity): %w", err)
 	}
-	log.Printf("Calculated file checksum: %s (SHA-256)", checksum)
+	log.Printf("Calculated file checksum: %s (SHA-256)", checksum[:16]+"...")
 
 	// Get Gofile server first (needed for upload) - skip if API key not configured
 	server := ""
@@ -723,7 +723,7 @@ func (su *StorageUploader) UploadRecording(ctx context.Context, filePath string)
 
 	// Launch Gofile upload goroutine with retry logic
 	go func() {
-		// Recover from panics to prevent deadlock (BUG 11 FIX)
+		// Recover from panics to prevent deadlock (BUG 10 FIX)
 		defer func() {
 			if r := recover(); r != nil {
 				log.Printf("PANIC in Gofile upload goroutine: %v", r)
@@ -735,10 +735,12 @@ func (su *StorageUploader) UploadRecording(ctx context.Context, filePath string)
 		}()
 		
 		// Check context before starting (BUG 2 FIX)
-		if ctx.Err() != nil {
+		select {
+		case <-ctx.Done():
 			log.Printf("Context cancelled before Gofile upload started")
 			gofileChan <- uploadResponse{service: "Gofile", err: ctx.Err()}
 			return
+		default:
 		}
 		
 		if su.gofileAPIKey == "" {
@@ -763,7 +765,7 @@ func (su *StorageUploader) UploadRecording(ctx context.Context, filePath string)
 
 	// Launch Filester upload goroutine with retry logic
 	go func() {
-		// Recover from panics to prevent deadlock (BUG 11 FIX)
+		// Recover from panics to prevent deadlock (BUG 10 FIX)
 		defer func() {
 			if r := recover(); r != nil {
 				log.Printf("PANIC in Filester upload goroutine: %v", r)
@@ -775,10 +777,12 @@ func (su *StorageUploader) UploadRecording(ctx context.Context, filePath string)
 		}()
 		
 		// Check context before starting (BUG 2 FIX)
-		if ctx.Err() != nil {
+		select {
+		case <-ctx.Done():
 			log.Printf("Context cancelled before Filester upload started")
 			filesterChan <- uploadResponse{service: "Filester", err: ctx.Err()}
 			return
+		default:
 		}
 		
 		if su.filesterAPIKey == "" {
