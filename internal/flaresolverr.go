@@ -8,7 +8,14 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sync"
 	"time"
+)
+
+// Global mutex to serialize FlareSolverr requests
+// FlareSolverr uses a single Chrome browser instance and can only handle one request at a time
+var (
+	flareSolverrMutex sync.Mutex
 )
 
 // FlareSolverrClient wraps HTTP requests through FlareSolverr proxy
@@ -68,6 +75,11 @@ func NewFlareSolverrClient() *FlareSolverrClient {
 
 // Get makes a GET request through FlareSolverr
 func (f *FlareSolverrClient) Get(ctx context.Context, url string, cookies map[string]string, headers map[string]string) (string, error) {
+	// Serialize FlareSolverr requests using a global mutex
+	// FlareSolverr uses a single Chrome browser and can only handle one request at a time
+	flareSolverrMutex.Lock()
+	defer flareSolverrMutex.Unlock()
+	
 	// Convert cookies to FlareSolverr format
 	var flareCookies []FlareCookie
 	for name, value := range cookies {
