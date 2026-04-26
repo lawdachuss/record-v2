@@ -81,78 +81,159 @@ func (c *Client) GetStream(ctx context.Context, username string) (*Stream, error
 }
 
 type apiResponse struct {
-	RoomStatus       string `json:"room_status"`
-	HLSSource        string `json:"hls_source"`
-	Code             string `json:"code"`
-	RoomTitle        string `json:"room_title"`
-	Gender           string `json:"broadcaster_gender"`
-	NumViewers       int    `json:"num_viewers"`
-	EdgeRegion       string `json:"edge_region"`
+	URL          string `json:"url"`
+	RoomStatus   string `json:"room_status"`
+	HLSSource    string `json:"hls_source"`
+	Success      bool   `json:"success"`
+	Code         string `json:"code"`
+	RoomTitle    string `json:"room_title"`
+	Gender       string `json:"broadcaster_gender"`
+	NumViewers   int    `json:"num_viewers"`
+	EdgeRegion   string `json:"edge_region"`
 	SummaryCardImage string `json:"summary_card_image"`
 }
 
 func FetchStream(ctx context.Context, client *internal.Req, username string) (*Stream, error) {
-	// In CI mode (FlareSolverr), use FlareSolverr's real Chrome browser to fetch
-	// the room page and parse initialRoomDossier. CycleTLS API calls don't work
-	// because Cloudflare detects TLS fingerprint mismatch with cf_clearance cookie
-	// and silently returns fake "offline" responses.
-	if os.Getenv("USE_FLARESOLVERR") == "true" {
-		fmt.Printf("[DEBUG] %s: CI mode - fetching room page via FlareSolverr\n", username)
-		return fetchStreamViaFlareSolverr(ctx, username)
-	}
-
-	// Normal mode: Use edge HLS API as primary method (most reliable)
-	fmt.Printf("[DEBUG] %s: Checking stream status via edge HLS API\n", username)
-	apiURL := fmt.Sprintf("%sget_edge_hls_url_ajax/", server.Config.Domain)
-	roomReferer := fmt.Sprintf("%s%s/", server.Config.Domain, username)
-	postData := fmt.Sprintf("room_slug=%s&bandwidth=high", username)
-
-	body, err := client.PostWithReferer(ctx, apiURL, postData, roomReferer)
-	if err != nil {
-		return nil, fmt.Errorf("edge API request failed: %w", err)
-	}
-
-	var hlsResp struct {
-		RoomStatus string `json:"room_status"`
-		URL        string `json:"url"`
-		Success    bool   `json:"success"`
-	}
-
-	if err := json.Unmarshal([]byte(body), &hlsResp); err != nil {
-		return nil, fmt.Errorf("parse edge API response: %w", err)
-	}
-
-	fmt.Printf("[INFO] %s: room_status=%q, url_present=%v, success=%v\n",
-		username, hlsResp.RoomStatus, hlsResp.URL != "", hlsResp.Success)
-
-	// If stream is online and we have a URL, return it immediately
-	if hlsResp.Success && hlsResp.URL != "" {
-		fmt.Printf("[INFO] %s: ✅ Stream is online\n", username)
-		return &Stream{HLSSource: hlsResp.URL}, nil
-	}
-
-	// Handle offline/unavailable states - no fallbacks, just return the status
-	meta := &Stream{}
+	// Generate CSRF token
+	csrfToken := fmt.Sprintf("%032x", time.Now().UnixNano())
 	
-	switch hlsResp.RoomStatus {
-	case "offline":
-		fmt.Printf("[INFO] %s: Channel is offline\n", username)
+	// Use the correct POST API
+	body, err := internal.PostChaturbateAPI(ctx, username, csrfToken)
+	if err != nil {
+		// If Cloudflare blocked us, try scraping with FlareSolverr
+		if errors.Is(err, internal.ErrCloudflareBlocked) {
+			if server.Config.Debug {
+				fmt.Printf("[DEBUG] Cloudflare block detected, trying FlareSolverr scraping...\n")
+			}
+			
+			// Try scraping the public page with retries and different strategies
+			var hlsURL, status string
+			var scrapeErr error
+			
+			for attempt := 1; attempt <= 5; attempt++ {
+				if server.Config.Debug {
+					fmt.Printf("[DEBUG] FlareSolverr attempt %d/5...\n", attempt)
+				}
+				
+				// Create a context with longer timeout for FlareSolverr (independent of recording duration)
+				attemptCtx, cancel := context.WithTimeout(ctx, 300*time.Second)
+				
+				// Try different approaches based on attempt number
+				if attempt <= 3 {
+					// First 3 attempts: Use FlareSolverr with sessions
+					hlsURL, status, scrapeErr = internal.ScrapeChaturbateStreamWithFlareSolverr(attemptCtx, username)
+				} else {
+					// Last 2 attempts: Try direct scraping (might work if CF protection is lighter)
+					if server.Config.Debug {
+						fmt.Printf("[DEBUG] Switching to direct scraping for attempt %d\n", attempt)
+					}
+					hlsURL, status, scrapeErr = internal.ScrapeChaturbateStream(attemptCtx, username)
+				}
+				cancel()
+				
+				if scrapeErr == nil {
+					break
+				}
+				
+				if server.Config.Debug {
+					fmt.Printf("[DEBUG] FlareSolverr attempt %d failed: %v\n", attempt, scrapeErr)
+				}
+				
+				// Exponential backoff with jitter to avoid FlareSolverr congestion
+				if attempt < 5 {
+					baseDelay := time.Duration(15+attempt*15) * time.Second
+					jitter := time.Duration(attempt*5) * time.Second
+					delay := baseDelay + jitter
+					if server.Config.Debug {
+						nextMethod := "FlareSolverr"
+						if attempt >= 3 {
+							nextMethod = "direct scraping"
+						}
+						fmt.Printf("[DEBUG] Waiting %v before retry (attempt %d will use %s)...\n", 
+							delay, attempt+1, nextMethod)
+					}
+					
+					// Check if context is cancelled during wait
+					select {
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					case <-time.After(delay):
+					}
+				}
+			}
+			
+			if scrapeErr != nil {
+				if server.Config.Debug {
+					fmt.Printf("[DEBUG] All FlareSolverr attempts failed, returning Cloudflare error\n")
+				}
+				return nil, fmt.Errorf("failed to get stream info: %w", err)
+			}
+			
+			meta := &Stream{}
+			
+			if status == "offline" {
+				return meta, internal.ErrChannelOffline
+			}
+			
+			if status == "private" {
+				return meta, internal.ErrPrivateStream
+			}
+			
+			if hlsURL == "" {
+				return meta, internal.ErrChannelOffline
+			}
+			
+			meta.HLSSource = hlsURL
+			if server.Config.Debug {
+				fmt.Printf("[DEBUG] Successfully scraped HLS URL: %s\n", hlsURL)
+			}
+			return meta, nil
+		}
+		
+		return nil, fmt.Errorf("failed to get stream info: %w", err)
+	}
+	
+	if server.Config.Debug {
+		fmt.Printf("[DEBUG] API response body: %s\n", body)
+	}
+
+	var resp apiResponse
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
+		return nil, fmt.Errorf("failed to parse stream info: %w", err)
+	}
+
+	if server.Config.Debug {
+		fmt.Printf("[DEBUG] Parsed response - success=%v, url_present=%v, room_status=%s\n", 
+			resp.Success, resp.URL != "", resp.RoomStatus)
+	}
+
+	// Always populate static metadata so the caller can update it even when offline.
+	meta := &Stream{
+		RoomTitle:        resp.RoomTitle,
+		Gender:           resp.Gender,
+		EdgeRegion:       resp.EdgeRegion,
+		SummaryCardImage: resp.SummaryCardImage,
+	}
+
+	// If we have a URL, the stream is accessible regardless of room_status
+	if resp.URL != "" {
+		meta.HLSSource = resp.URL
+		meta.NumViewers = resp.NumViewers
+		return meta, nil
+	}
+
+	// If success is true but no URL, might be offline
+	if resp.Success {
 		return meta, internal.ErrChannelOffline
+	}
+
+	// Check room status only if no URL and not successful
+	switch resp.RoomStatus {
 	case "private":
-		fmt.Printf("[INFO] %s: Channel is in private show\n", username)
 		return meta, internal.ErrPrivateStream
 	case "hidden":
-		fmt.Printf("[INFO] %s: Channel is in hidden show\n", username)
 		return meta, internal.ErrHiddenStream
-	case "away":
-		fmt.Printf("[INFO] %s: Performer is away\n", username)
-		return meta, internal.ErrChannelOffline
-	case "password protected":
-		fmt.Printf("[INFO] %s: Room is password protected\n", username)
-		return meta, internal.ErrRoomPasswordRequired
 	default:
-		// Unknown status or empty status - treat as offline
-		fmt.Printf("[INFO] %s: Unknown status %q, treating as offline\n", username, hlsResp.RoomStatus)
 		return meta, internal.ErrChannelOffline
 	}
 }

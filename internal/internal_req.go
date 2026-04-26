@@ -279,6 +279,33 @@ func (h *Req) Get(ctx context.Context, url string) (string, error) {
 	return string(resp), nil
 }
 
+// PostJSON sends an HTTP POST request with JSON body and returns the response as a string.
+func (h *Req) PostJSON(ctx context.Context, url string, jsonBody string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(jsonBody))
+	if err != nil {
+		return "", fmt.Errorf("new request: %w", err)
+	}
+	
+	h.SetRequestHeaders(req)
+	req.Header.Set("Content-Type", "application/json")
+	
+	resp, err := h.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("do request: %w", err)
+	}
+	defer resp.Body.Close()
+	
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("read body: %w", err)
+	}
+	
+	return string(body), nil
+}
+
 // GetBytes sends an HTTP GET request and returns the response as a byte slice.
 func (h *Req) GetBytes(ctx context.Context, url string) ([]byte, error) {
 	// Use CycleTLS if enabled (GitHub Actions mode)
