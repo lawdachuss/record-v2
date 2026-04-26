@@ -61,7 +61,21 @@ jobs:
           # Generate matrix jobs as array of objects containing id and channel name
           MATRIX_COUNT="${{ steps.validate.outputs.validated_matrix_count }}"
           CHANNELS_LIST="${{ steps.validate.outputs.resolved_channels }}"
+          
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "Matrix Generation Debug:"
+          echo "  Matrix count: $MATRIX_COUNT"
+          echo "  Channels list: $CHANNELS_LIST"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          
           MATRIX_JOBS=$(echo "$CHANNELS_LIST" | tr ',' '\n' | head -n $MATRIX_COUNT | jq -R -s -c 'split("\n") | map(select(length > 0)) | to_entries | map({"id": (.key + 1 | tostring), "channel": .value})')
+          
+          echo "Generated matrix jobs JSON:"
+          echo "$MATRIX_JOBS" | jq '.'
+          echo ""
+          echo "Number of jobs in matrix: $(echo "$MATRIX_JOBS" | jq '. | length')"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          
           echo "matrix_jobs=$MATRIX_JOBS" >> $GITHUB_OUTPUT
           echo "Generated matrix jobs: $MATRIX_JOBS"
 
