@@ -251,14 +251,21 @@ func parseInitialRoomDossier(html, username string) (*Stream, error) {
 		return nil, fmt.Errorf("could not find end of initialRoomDossier string")
 	}
 
-	// The content is a JSON string that was escaped for embedding in JS
-	// Unescape it: \" -> ", \/ -> /, \u0022 -> ", etc.
+	// The content is a JSON string that was escaped for embedding in a JS string literal.
+	// It uses \u0022 for quotes and \/ for slashes.
+	// We can let Go's strconv.Unquote evaluate the Javascript string literal syntax
+	// perfectly by wrapping it back in quotes.
 	rawJSON := html[startIdx:endIdx]
-	// Replace escaped quotes
-	rawJSON = strings.ReplaceAll(rawJSON, "\\\"", "\"")
-	rawJSON = strings.ReplaceAll(rawJSON, "\\/", "/")
-	rawJSON = strings.ReplaceAll(rawJSON, "\\\\", "\\")
-	// Handle unicode escapes (\uXXXX) - Go's json.Unmarshal handles these natively
+	
+	unquoted, err := strconv.Unquote(`"` + rawJSON + `"`)
+	if err != nil {
+		// Fallback to manual replacement if unquote fails for some reason
+		rawJSON = strings.ReplaceAll(rawJSON, "\\u0022", "\"")
+		rawJSON = strings.ReplaceAll(rawJSON, "\\\"", "\"")
+		rawJSON = strings.ReplaceAll(rawJSON, "\\/", "/")
+		rawJSON = strings.ReplaceAll(rawJSON, "\\\\", "\\")
+		unquoted = rawJSON
+	}
 
 	// Parse the JSON
 	var dossier struct {
@@ -270,9 +277,9 @@ func parseInitialRoomDossier(html, username string) (*Stream, error) {
 		SummaryCardImage string `json:"summary_card_image"`
 	}
 
-	if err := json.Unmarshal([]byte(rawJSON), &dossier); err != nil {
+	if err := json.Unmarshal([]byte(unquoted), &dossier); err != nil {
 		// Log first 500 chars of raw JSON for debugging
-		preview := rawJSON
+		preview := unquoted
 		if len(preview) > 500 {
 			preview = preview[:500] + "..."
 		}
