@@ -128,7 +128,7 @@ jobs:
             state-latest-job-${{ matrix.job.id }}
       
       - name: Upload cached recordings from previous run
-        if: steps.restore_job_state.outputs.cache-hit == 'true'
+        if: always()
         env:
           GOFILE_API_KEY: ${{ secrets.GOFILE_API_KEY }}
           FILESTER_API_KEY: ${{ secrets.FILESTER_API_KEY }}
@@ -136,6 +136,8 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: |
           echo "📦 Checking for cached recordings from previous run..."
+          echo "Cache was restored: ${{ steps.restore_job_state.outputs.cache-hit }}"
+          echo "Cache key used: ${{ steps.restore_job_state.outputs.cache-matched-key }}"
           echo ""
           
           # Check if there are any recordings in cache
