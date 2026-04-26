@@ -493,6 +493,36 @@ jobs:
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo ""
           
+          # Wait for any recording processes to finish writing
+          echo "⏳ Waiting for recording processes to finish..."
+          sleep 5
+          
+          # Check if goondvr process is still running and wait for it to exit
+          if pgrep -x "goondvr" > /dev/null; then
+            echo "⏳ GoondVR process still running, waiting for graceful shutdown..."
+            # Wait up to 30 seconds for the process to exit
+            for i in {1..30}; do
+              if ! pgrep -x "goondvr" > /dev/null; then
+                echo "✅ GoondVR process exited gracefully"
+                break
+              fi
+              sleep 1
+            done
+            
+            # If still running after 30 seconds, force kill
+            if pgrep -x "goondvr" > /dev/null; then
+              echo "⚠️  Force killing GoondVR process..."
+              pkill -9 goondvr
+              sleep 2
+            fi
+          else
+            echo "✅ GoondVR process already exited"
+          fi
+          
+          # Additional wait to ensure file handles are released
+          echo "⏳ Ensuring all file handles are released..."
+          sleep 3
+          
           # Check if there are any recordings
           if [ -d "./videos" ]; then
             echo "📁 Videos directory contents:"
@@ -510,6 +540,22 @@ jobs:
               echo "📋 Files to be cached:"
               find ./videos -type f \( -name "*.ts" -o -name "*.mp4" -o -name "*.mkv" \) -exec ls -lh {} \;
               echo ""
+              
+              # Verify files are not being written to
+              echo "🔍 Verifying files are stable..."
+              for video in ./videos/*.ts ./videos/*.mp4 ./videos/*.mkv; do
+                [ -f "$video" ] || continue
+                
+                # Check if any process has the file open
+                if lsof "$video" 2>/dev/null | grep -q .; then
+                  echo "⚠️  Warning: $video is still open by a process"
+                  lsof "$video" 2>/dev/null || true
+                else
+                  echo "✅ $video is closed and ready for caching"
+                fi
+              done
+              
+              echo ""
               echo "✅ Next workflow run will upload them automatically"
             else
               echo "ℹ️  No video recordings found"
@@ -520,6 +566,42 @@ jobs:
           
           echo ""
           echo "🛡️ Emergency cleanup complete - recordings ready for cache"
+      
+      - name: Prepare stable recordings for cache
+        if: always()
+        run: |
+          echo "📦 Preparing stable recordings for cache..."
+          
+          # Create a temporary directory for stable files
+          mkdir -p ./videos-stable
+          
+          # Copy only closed/stable video files
+          if [ -d "./videos" ]; then
+            for video in ./videos/*.ts ./videos/*.mp4 ./videos/*.mkv; do
+              [ -f "$video" ] || continue
+              
+              filename=$(basename "$video")
+              
+              # Check if file is still being written to
+              if lsof "$video" 2>/dev/null | grep -q .; then
+                echo "⚠️  Skipping $filename (still open)"
+              else
+                echo "✅ Copying $filename to stable cache"
+                cp "$video" "./videos-stable/$filename"
+              fi
+            done
+            
+            # If we have stable files, replace videos directory
+            if [ "$(ls -A ./videos-stable 2>/dev/null)" ]; then
+              echo "✅ Prepared $(ls ./videos-stable | wc -l) stable file(s) for caching"
+              # Move stable files back to videos directory
+              rm -rf ./videos
+              mv ./videos-stable ./videos
+            else
+              echo "ℹ️  No stable files to cache"
+              rm -rf ./videos-stable
+            fi
+          fi
       
       - name: Save shared configuration cache
         if: always()
