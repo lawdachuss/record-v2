@@ -60,7 +60,7 @@ func NewFlareSolverrClient() *FlareSolverrClient {
 	return &FlareSolverrClient{
 		baseURL: baseURL,
 		client: &http.Client{
-			Timeout: 180 * time.Second, // 3 minutes for FlareSolverr to solve challenge
+			Timeout: 240 * time.Second, // 4 minutes for FlareSolverr to solve challenge (increased from 3 min)
 		},
 	}
 }
@@ -79,7 +79,7 @@ func (f *FlareSolverrClient) Get(ctx context.Context, url string, cookies map[st
 	reqData := FlareSolverrRequest{
 		Cmd:        "request.get",
 		URL:        url,
-		MaxTimeout: 120000, // 120 seconds (2 minutes) for Cloudflare challenge
+		MaxTimeout: 180000, // 180 seconds (3 minutes) - increased for difficult challenges
 		Cookies:    flareCookies,
 		Headers:    headers,
 	}

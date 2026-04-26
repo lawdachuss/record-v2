@@ -38,11 +38,30 @@ func RefreshCookiesWithFlareSolverr(ctx context.Context) error {
 	headers["Accept-Language"] = "en-US,en;q=0.5"
 	headers["X-Requested-With"] = "XMLHttpRequest" // CRITICAL: Bypass age gate
 
-	// Step 1: Visit homepage to get initial cookies and solve Cloudflare
-	log.Printf("   Step 1: Visiting %s through FlareSolverr...", chaturbateURL)
-	_, cookies, userAgent, err := flare.GetWithCookiesAndUA(ctx, chaturbateURL, nil, headers)
-	if err != nil {
-		return fmt.Errorf("flaresolverr homepage request failed: %w", err)
+	var cookies map[string]string
+	var userAgent string
+	var err error
+	
+	// Retry up to 3 times if FlareSolverr fails
+	maxRetries := 3
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		if attempt > 1 {
+			log.Printf("   Retry attempt %d/%d...", attempt, maxRetries)
+		}
+		
+		// Step 1: Visit homepage to get initial cookies and solve Cloudflare
+		log.Printf("   Step 1: Visiting %s through FlareSolverr...", chaturbateURL)
+		_, cookies, userAgent, err = flare.GetWithCookiesAndUA(ctx, chaturbateURL, nil, headers)
+		if err != nil {
+			if attempt < maxRetries {
+				log.Printf("   ⚠️  Attempt %d failed: %v", attempt, err)
+				continue
+			}
+			return fmt.Errorf("flaresolverr homepage request failed after %d attempts: %w", maxRetries, err)
+		}
+		
+		// Success, break out of retry loop
+		break
 	}
 
 	// Step 2: Visit a public room page to establish a proper session
@@ -139,7 +158,7 @@ func (f *FlareSolverrClient) GetWithCookiesAndUA(ctx context.Context, url string
 	reqData := FlareSolverrRequest{
 		Cmd:        "request.get",
 		URL:        url,
-		MaxTimeout: 120000, // 120 seconds (2 minutes) for Cloudflare challenge
+		MaxTimeout: 180000, // 180 seconds (3 minutes) - increased for difficult challenges
 		Cookies:    flareCookies,
 		Headers:    headers,
 	}
