@@ -772,6 +772,16 @@ func (gam *GitHubActionsMode) StartWorkflowLifecycle(configDir, recordingsDir st
 	} else {
 		log.Println("State restored successfully from cache")
 	}
+
+	// Step 1.5: Sync database before starting new recording
+	log.Println("Syncing database before starting new recording...")
+	if err := gam.DatabaseManager.SyncDatabase(); err != nil {
+		log.Printf("Warning: database sync failed: %v", err)
+		log.Println("Continuing with workflow startup - database will sync on first write")
+		// Continue anyway - this is not critical, the AtomicUpdate will handle conflicts
+	} else {
+		log.Println("Database synced successfully with remote repository")
+	}
 	
 	// Step 2: Get assigned channel and create channel configuration
 	log.Printf("Getting assigned channel for matrix job %s...", gam.MatrixJobID)

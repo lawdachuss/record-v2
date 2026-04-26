@@ -470,6 +470,26 @@ func (dm *DatabaseManager) gitCommit(message string) error {
 	return nil
 }
 
+// SyncDatabase performs a git pull to sync the database with the remote repository.
+// This should be called before starting a new recording to ensure we have the latest
+// database state and avoid conflicts.
+//
+// Requirements: 15.8
+func (dm *DatabaseManager) SyncDatabase() error {
+	dm.gitMu.Lock()
+	defer dm.gitMu.Unlock()
+
+	fmt.Println("[DatabaseManager] Syncing database with remote repository...")
+	
+	// Perform git pull to get latest changes
+	if err := dm.gitPull(); err != nil {
+		return fmt.Errorf("failed to sync database: %w", err)
+	}
+	
+	fmt.Println("[DatabaseManager] Database sync completed successfully")
+	return nil
+}
+
 // gitPush pushes commits to the remote repository.
 // If no remote is configured (e.g., in tests), this operation is skipped.
 func (dm *DatabaseManager) gitPush() error {
