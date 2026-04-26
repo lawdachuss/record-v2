@@ -184,10 +184,12 @@ func fetchStreamViaFlareSolverr(ctx context.Context, username string) (*Stream, 
 	cookies := internal.ParseCookies(server.Config.Cookies)
 
 	// Headers for the request
+	// CRITICAL: X-Requested-With header bypasses age gate
+	// Source: https://gist.github.com/you-cant-see-me/811ab5f9461b7aa0d69f59db7eed98ec
 	headers := map[string]string{
 		"Accept":           "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 		"Accept-Language":  "en-US,en;q=0.5",
-		"X-Requested-With": "XMLHttpRequest",
+		"X-Requested-With": "XMLHttpRequest", // CRITICAL: Bypass age gate
 	}
 
 	// Fetch room page through FlareSolverr's real Chrome browser
@@ -223,20 +225,58 @@ func fetchStreamViaFlareSolverr(ctx context.Context, username string) (*Stream, 
 		
 		// FALLBACK: Try the legacy API endpoint as a last resort
 		// This might work even when initialRoomDossier is missing
-		fmt.Printf("[INFO] %s: Trying legacy API as fallback...\n", username)
+		fmt.Printf("[INFO] %s: Trying legacy API via FlareSolverr as fallback...\n", username)
 		
-		// Create a client with the same configuration
-		client := internal.NewReq()
+		// Use FlareSolverr to call the API endpoint (bypasses age gate)
+		apiURL := fmt.Sprintf("%sapi/chatvideocontext/%s/", server.Config.Domain, cleanUsername)
+		fmt.Printf("[DEBUG] %s: Calling API via FlareSolverr: %s\n", username, apiURL)
 		
-		legacyStream, legacyErr := fetchStreamLegacy(ctx, client, cleanUsername)
-		if legacyErr == nil && legacyStream != nil && legacyStream.HLSSource != "" {
-			fmt.Printf("[INFO] %s: ✅ Legacy API fallback successful! HLS URL found\n", username)
+		// Use the same headers to bypass age gate
+		apiHeaders := map[string]string{
+			"Accept":           "application/json,text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+			"Accept-Language":  "en-US,en;q=0.5",
+			"X-Requested-With": "XMLHttpRequest", // CRITICAL: Bypass age gate
+		}
+		
+		apiBody, _, _, err := flare.GetWithCookiesAndUA(ctx, apiURL, cookies, apiHeaders)
+		if err != nil {
+			fmt.Printf("[WARN] %s: FlareSolverr API call failed: %v\n", username, err)
+			return &Stream{}, internal.ErrChannelOffline
+		}
+		
+		fmt.Printf("[DEBUG] %s: API response received (length: %d)\n", username, len(apiBody))
+		
+		var resp apiResponse
+		if err := json.Unmarshal([]byte(apiBody), &resp); err != nil {
+			fmt.Printf("[ERROR] %s: Failed to parse API response: %v\n", username, err)
+			fmt.Printf("[ERROR] %s: Raw response (first 500 chars): %s\n", username, truncate(apiBody, 500))
+			return &Stream{}, internal.ErrChannelOffline
+		}
+		
+		fmt.Printf("[INFO] %s: API Response - room_status=%q, hls_source_present=%v, code=%q, num_viewers=%d\n", 
+			username, resp.RoomStatus, resp.HLSSource != "", resp.Code, resp.NumViewers)
+		
+		if resp.HLSSource != "" {
+			fmt.Printf("[INFO] %s: ✅ Legacy API via FlareSolverr successful! HLS URL found\n", username)
+			
+			// Clean up fast_start parameter
+			hlsURL := resp.HLSSource
+			hlsURL = strings.ReplaceAll(hlsURL, "?fast_start=true&", "?")
+			hlsURL = strings.ReplaceAll(hlsURL, "&fast_start=true", "")
+			hlsURL = strings.ReplaceAll(hlsURL, "?fast_start=true", "")
+			
+			legacyStream := &Stream{
+				HLSSource:        hlsURL,
+				RoomTitle:        resp.RoomTitle,
+				Gender:           resp.Gender,
+				NumViewers:       resp.NumViewers,
+				SummaryCardImage: resp.SummaryCardImage,
+			}
 			return legacyStream, nil
 		}
 		
-		if legacyErr != nil {
-			fmt.Printf("[WARN] %s: Legacy API fallback also failed: %v\n", username, legacyErr)
-		}
+		fmt.Printf("[WARN] %s: Legacy API via FlareSolverr returned no HLS source (room_status=%s, code=%s)\n", 
+			username, resp.RoomStatus, resp.Code)
 		
 		return &Stream{}, internal.ErrChannelOffline
 	}
