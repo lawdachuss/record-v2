@@ -27,6 +27,7 @@ type GitHubActionsMode struct {
 	StatePersister        *StatePersister
 	MatrixCoordinator     *MatrixCoordinator
 	StorageUploader       *StorageUploader
+	SupabaseManager       *SupabaseManager
 	DatabaseManager       *DatabaseManager
 	QualitySelector       *QualitySelector
 	HealthMonitor         *HealthMonitor
@@ -120,6 +121,27 @@ func (gam *GitHubActionsMode) initializeComponents() error {
 	// Initialize Storage Uploader
 	gam.StorageUploader = NewStorageUploader(gofileAPIKey, filesterAPIKey)
 	log.Println("Storage Uploader initialized with Gofile and Filester API keys")
+	
+	// Initialize Supabase Manager (optional)
+	supabaseURL := os.Getenv("SUPABASE_URL")
+	supabaseKey := os.Getenv("SUPABASE_KEY")
+	
+	if supabaseURL != "" && supabaseKey != "" {
+		gam.SupabaseManager = NewSupabaseManager(supabaseURL, supabaseKey)
+		log.Println("Supabase Manager initialized")
+		
+		// Test connection
+		if err := gam.SupabaseManager.TestConnection(); err != nil {
+			log.Printf("⚠️  WARNING: Supabase connection test failed: %v", err)
+			log.Println("⚠️  Supabase integration will be disabled. Recordings will only be saved to JSON database.")
+			gam.SupabaseManager = nil
+		} else {
+			log.Println("✅ Supabase connection test successful")
+		}
+	} else {
+		log.Println("Supabase not configured (SUPABASE_URL or SUPABASE_KEY missing) - skipping Supabase integration")
+		gam.SupabaseManager = nil
+	}
 	
 	// Initialize Database Manager
 	repoPath := "."

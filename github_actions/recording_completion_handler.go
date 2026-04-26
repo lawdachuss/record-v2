@@ -19,6 +19,7 @@ import (
 type RecordingCompletionHandler struct {
 	storageUploader *StorageUploader
 	databaseManager *DatabaseManager
+	supabaseManager *SupabaseManager
 	healthMonitor   *HealthMonitor
 	sessionID       string
 	matrixJobID     string
@@ -28,6 +29,7 @@ type RecordingCompletionHandler struct {
 func NewRecordingCompletionHandler(
 	storageUploader *StorageUploader,
 	databaseManager *DatabaseManager,
+	supabaseManager *SupabaseManager,
 	healthMonitor *HealthMonitor,
 	sessionID string,
 	matrixJobID string,
@@ -35,6 +37,7 @@ func NewRecordingCompletionHandler(
 	return &RecordingCompletionHandler{
 		storageUploader: storageUploader,
 		databaseManager: databaseManager,
+		supabaseManager: supabaseManager,
 		healthMonitor:   healthMonitor,
 		sessionID:       sessionID,
 		matrixJobID:     matrixJobID,
@@ -175,6 +178,46 @@ func (rch *RecordingCompletionHandler) HandleRecordingCompletion(
 		log.Printf("[RecordingCompletionHandler] Recording added to database successfully")
 	}
 
+	// Step 4.5: Add recording to Supabase (if configured)
+	if rch.supabaseManager != nil {
+		log.Printf("[RecordingCompletionHandler] Adding recording to Supabase...")
+		
+		supabaseRecording := SupabaseRecording{
+			Site:           site,
+			Channel:        channel,
+			Timestamp:      startTime,
+			Date:           date,
+			DurationSec:    int(duration),
+			FileSizeBytes:  fileSizeBytes,
+			Quality:        quality,
+			GofileURL:      uploadResult.GofileURL,
+			FilesterURL:    uploadResult.FilesterURL,
+			FilesterChunks: uploadResult.FilesterChunks,
+			SessionID:      rch.sessionID,
+			MatrixJob:      rch.matrixJobID,
+		}
+		
+		insertedRecord, err := rch.supabaseManager.InsertRecording(supabaseRecording)
+		if err != nil {
+			log.Printf("[RecordingCompletionHandler] Failed to add recording to Supabase: %v", err)
+			
+			// Send notification about Supabase failure
+			notificationErr := rch.healthMonitor.SendNotification(
+				"Supabase Update Failed",
+				fmt.Sprintf("Failed to add recording metadata to Supabase for channel %s: %v. Recording is uploaded and in JSON database.", channel, err),
+			)
+			if notificationErr != nil {
+				log.Printf("[RecordingCompletionHandler] Failed to send Supabase failure notification: %v", notificationErr)
+			}
+			
+			// Continue even if Supabase insert fails - JSON database is primary
+		} else {
+			log.Printf("[RecordingCompletionHandler] Recording added to Supabase successfully (ID: %s)", insertedRecord.ID)
+		}
+	} else {
+		log.Printf("[RecordingCompletionHandler] Supabase not configured, skipping Supabase insert")
+	}
+
 	// Step 5: Send notification via Health Monitor (Requirement 6.7)
 	log.Printf("[RecordingCompletionHandler] Sending completion notification...")
 	notificationTitle := fmt.Sprintf("Recording Completed - %s", channel)
@@ -242,6 +285,11 @@ func (rch *RecordingCompletionHandler) GetStorageUploader() *StorageUploader {
 // GetDatabaseManager returns the database manager instance.
 func (rch *RecordingCompletionHandler) GetDatabaseManager() *DatabaseManager {
 	return rch.databaseManager
+}
+
+// GetSupabaseManager returns the supabase manager instance.
+func (rch *RecordingCompletionHandler) GetSupabaseManager() *SupabaseManager {
+	return rch.supabaseManager
 }
 
 // GetHealthMonitor returns the health monitor instance.
