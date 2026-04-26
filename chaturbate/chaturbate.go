@@ -263,18 +263,53 @@ func parseInitialRoomDossier(html, username string) (*Stream, error) {
 			return nil, fmt.Errorf("cloudflare challenge detected - check cookies")
 		}
 		
-		// Check if we got an error page
-		if strings.Contains(html, "404") || strings.Contains(html, "Not Found") {
+		// Check if we got a real 404 page (more specific check)
+		// Real 404 pages are usually small (<50KB) and contain specific error messages
+		if len(html) < 50000 && (strings.Contains(html, "<title>404") || strings.Contains(html, "Page Not Found")) {
 			fmt.Printf("[ERROR] %s: Received 404 page - channel may not exist\n", username)
 			return nil, fmt.Errorf("channel not found (404)")
 		}
 		
-		// Show a snippet of what we got
-		snippet := html
-		if len(snippet) > 1000 {
-			snippet = snippet[:1000]
+		// Extract meaningful snippets from different parts of the HTML
+		// Look for script tags, title, and body content
+		fmt.Printf("[DEBUG] %s: Analyzing HTML structure...\n", username)
+		
+		// Check for title tag
+		if titleStart := strings.Index(html, "<title>"); titleStart != -1 {
+			titleEnd := strings.Index(html[titleStart:], "</title>")
+			if titleEnd != -1 {
+				title := html[titleStart+7 : titleStart+titleEnd]
+				fmt.Printf("[DEBUG] %s: Page title: %s\n", username, title)
+			}
 		}
-		fmt.Printf("[DEBUG] %s: HTML snippet (first 1000 chars): %s\n", username, snippet)
+		
+		// Look for any script tags that might contain room data
+		scriptCount := strings.Count(html, "<script")
+		fmt.Printf("[DEBUG] %s: Found %d script tags in HTML\n", username, scriptCount)
+		
+		// Check if this looks like a valid Chaturbate room page
+		hasRoomPage := strings.Contains(html, "room_page") || strings.Contains(html, "roomPage")
+		hasChaturbate := strings.Contains(html, "chaturbate")
+		fmt.Printf("[DEBUG] %s: Has room_page markers: %v, Has chaturbate markers: %v\n", username, hasRoomPage, hasChaturbate)
+		
+		// Show a snippet of the HTML around where we'd expect to find the data
+		// Look for common Chaturbate page markers
+		markers := []string{"window.", "var ", "const ", "<script>"}
+		for _, marker := range markers {
+			if idx := strings.Index(html, marker); idx != -1 {
+				start := idx
+				if start > 200 {
+					start = idx - 200
+				}
+				end := idx + 800
+				if end > len(html) {
+					end = len(html)
+				}
+				snippet := html[start:end]
+				fmt.Printf("[DEBUG] %s: HTML snippet around '%s': %s\n", username, marker, snippet)
+				break // Only show one snippet
+			}
+		}
 		
 		return nil, fmt.Errorf("initialRoomDossier not found in HTML (tried %d patterns)", len(patterns))
 	}
