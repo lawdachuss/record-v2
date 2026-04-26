@@ -506,7 +506,7 @@ jobs:
               echo "ℹ️  No new database entries to commit"
             else
               # Commit with cached upload flag
-              COMMIT_MSG=$'chore: update recording database (cached uploads) [skip ci]\n\nJob: ${{ matrix.job.id }}\nChannel: ${{ matrix.job.channel }}\nRun ID: ${{ github.run_id }}\nSession: ${{ needs.validate.outputs.session_id }}\nSource: Cached recordings from previous run\nTimestamp: '"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'
+              COMMIT_MSG=$(printf "chore: update recording database (cached uploads) [skip ci]\n\nJob: %s\nChannel: %s\nRun ID: %s\nSession: %s\nSource: Cached recordings from previous run\nTimestamp: %s" "${{ matrix.job.id }}" "${{ matrix.job.channel }}" "${{ github.run_id }}" "${{ needs.validate.outputs.session_id }}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)")
               
               git commit -m "$COMMIT_MSG"
               
@@ -969,13 +969,8 @@ jobs:
           if [ -d "./database" ] && [ "$(ls -A ./database 2>/dev/null)" ]; then
             git add ./database/*/*.json 2>/dev/null || true
             if ! git diff --staged --quiet 2>/dev/null; then
-              git commit -m "chore: emergency upload ($SOURCE) [skip ci]
-
-Job: ${{ matrix.job.id }}
-Channel: ${{ matrix.job.channel }}
-Reason: $REASON
-Uploaded: $UPLOADED files
-Timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)" 2>/dev/null || true
+              COMMIT_MSG=$(printf "chore: emergency upload (%s) [skip ci]\n\nJob: %s\nChannel: %s\nReason: %s\nUploaded: %s files\nTimestamp: %s" "$SOURCE" "${{ matrix.job.id }}" "${{ matrix.job.channel }}" "$REASON" "$UPLOADED" "$(date -u +%Y-%m-%dT%H:%M:%SZ)")
+              git commit -m "$COMMIT_MSG" 2>/dev/null || true
               
               for i in 1 2 3; do
                 if git push origin HEAD:main 2>/dev/null; then
@@ -1023,7 +1018,7 @@ Timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)" 2>/dev/null || true
               echo "ℹ️  No new database entries to commit"
             else
               # Commit with emergency flag
-              COMMIT_MSG=$'chore: emergency database update [skip ci]\n\nJob: ${{ matrix.job.id }}\nChannel: ${{ matrix.job.channel }}\nRun ID: ${{ github.run_id }}\nSession: ${{ needs.validate.outputs.session_id }}\nStatus: Emergency/Timeout\nTimestamp: '"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'
+              COMMIT_MSG=$(printf "chore: emergency database update [skip ci]\n\nJob: %s\nChannel: %s\nRun ID: %s\nSession: %s\nStatus: Emergency/Timeout\nTimestamp: %s" "${{ matrix.job.id }}" "${{ matrix.job.channel }}" "${{ github.run_id }}" "${{ needs.validate.outputs.session_id }}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)")
               
               git commit -m "$COMMIT_MSG"
               
@@ -1149,7 +1144,7 @@ Timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)" 2>/dev/null || true
               echo "ℹ️  No new database entries to commit"
             else
               # Commit with detailed message
-              COMMIT_MSG=$'chore: update recording database [skip ci]\n\nJob: ${{ matrix.job.id }}\nChannel: ${{ matrix.job.channel }}\nRun ID: ${{ github.run_id }}\nSession: ${{ needs.validate.outputs.session_id }}\nTimestamp: '"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'
+              COMMIT_MSG=$(printf "chore: update recording database [skip ci]\n\nJob: %s\nChannel: %s\nRun ID: %s\nSession: %s\nTimestamp: %s" "${{ matrix.job.id }}" "${{ matrix.job.channel }}" "${{ github.run_id }}" "${{ needs.validate.outputs.session_id }}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)")
               
               git commit -m "$COMMIT_MSG"
               
