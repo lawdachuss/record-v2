@@ -91,8 +91,16 @@ type apiResponse struct {
 }
 
 func FetchStream(ctx context.Context, client *internal.Req, username string) (*Stream, error) {
-	fmt.Printf("[DEBUG] %s: Using alternative HLS API endpoint\n", username)
+	fmt.Printf("[DEBUG] %s: Trying both API endpoints for better detection\n", username)
 	
+	// Try legacy API first
+	legacyStream, legacyErr := fetchStreamLegacy(ctx, client, username)
+	if legacyErr == nil && legacyStream != nil && legacyStream.HLSSource != "" {
+		fmt.Printf("[INFO] %s: Legacy API returned stream successfully\n", username)
+		return legacyStream, nil
+	}
+	
+	// Try alternative HLS API endpoint
 	// Use the /get_edge_hls_url_ajax/ endpoint which works better with automated tools
 	// This endpoint doesn't require the same level of age verification as /api/chatvideocontext/
 	// Source: https://gist.github.com/mywalkb/1c9a26a59018cf1af40eb2fe0e8dea33
@@ -106,8 +114,11 @@ func FetchStream(ctx context.Context, client *internal.Req, username string) (*S
 	body, err := client.Post(ctx, apiURL, postData)
 	if err != nil {
 		fmt.Printf("[ERROR] %s: HLS API call failed: %v\n", username, err)
-		// Fallback to old API
-		return fetchStreamLegacy(ctx, client, username)
+		// Return the legacy error if both failed
+		if legacyStream != nil {
+			return legacyStream, legacyErr
+		}
+		return nil, err
 	}
 	
 	fmt.Printf("[DEBUG] %s: HLS API response received (length: %d)\n", username, len(body))
@@ -121,28 +132,46 @@ func FetchStream(ctx context.Context, client *internal.Req, username string) (*S
 	
 	if err := json.Unmarshal([]byte(body), &hlsResp); err != nil {
 		fmt.Printf("[ERROR] %s: Failed to parse HLS API response: %v\n", username, err)
-		// Fallback to old API
-		return fetchStreamLegacy(ctx, client, username)
+		// Return the legacy error if both failed
+		if legacyStream != nil {
+			return legacyStream, legacyErr
+		}
+		return nil, err
 	}
 	
 	fmt.Printf("[INFO] %s: HLS API Response - room_status=%q, url_present=%v, success=%v\n", 
 		username, hlsResp.RoomStatus, hlsResp.URL != "", hlsResp.Success)
 
-	meta := &Stream{}
-	
+	// If HLS API returned a stream URL, use it
 	if hlsResp.Success && hlsResp.URL != "" {
-		meta.HLSSource = hlsResp.URL
+		meta := &Stream{HLSSource: hlsResp.URL}
+		fmt.Printf("[INFO] %s: HLS API returned stream successfully\n", username)
 		return meta, nil
 	}
 
+	// Both APIs failed - return the most specific error
+	meta := &Stream{}
+	if legacyStream != nil {
+		meta = legacyStream
+	}
+	
+	// Prioritize specific errors over generic offline
 	switch hlsResp.RoomStatus {
 	case "private":
 		return meta, internal.ErrPrivateStream
 	case "hidden":
 		return meta, internal.ErrHiddenStream
 	case "offline":
+		// If legacy API had a different error, return that instead
+		if legacyErr != nil && legacyErr != internal.ErrChannelOffline {
+			return meta, legacyErr
+		}
 		return meta, internal.ErrChannelOffline
 	default:
+		// If legacy API had an error, return that
+		if legacyErr != nil {
+			return meta, legacyErr
+		}
 		return meta, internal.ErrChannelOffline
 	}
 }

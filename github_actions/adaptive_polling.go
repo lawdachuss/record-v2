@@ -10,7 +10,7 @@ import (
 )
 
 // AdaptivePolling manages dynamic polling interval adjustment based on recording activity.
-// It reduces the polling interval to 5 minutes when no recordings are active to save resources,
+// It reduces the polling interval to 1 minute when no recordings are active to save resources,
 // and restores the normal interval when recordings become active.
 //
 // In cost-saving mode, it uses a fixed 10-minute polling interval regardless of recording activity.
@@ -18,7 +18,7 @@ import (
 // Requirements: 9.1, 12.6
 type AdaptivePolling struct {
 	normalInterval     int           // Normal polling interval in minutes (from config)
-	reducedInterval    int           // Reduced polling interval in minutes (5 minutes)
+	reducedInterval    int           // Reduced polling interval in minutes (1 minute)
 	costSavingInterval int           // Cost-saving polling interval in minutes (10 minutes)
 	currentInterval    int           // Current active polling interval
 	costSavingMode     bool          // Whether cost-saving mode is enabled
@@ -44,7 +44,7 @@ func NewAdaptivePolling(normalInterval int) *AdaptivePolling {
 	
 	return &AdaptivePolling{
 		normalInterval:     normalInterval,
-		reducedInterval:    5,  // Fixed at 5 minutes per requirement
+		reducedInterval:    1,  // Changed to 1 minute for faster detection
 		costSavingInterval: 10, // Fixed at 10 minutes per requirement 12.6
 		currentInterval:    normalInterval,
 		costSavingMode:     false,
@@ -76,7 +76,7 @@ func NewAdaptivePollingWithCostSaving(normalInterval int, costSavingMode bool) *
 	
 	return &AdaptivePolling{
 		normalInterval:     normalInterval,
-		reducedInterval:    5,  // Fixed at 5 minutes per requirement
+		reducedInterval:    1,  // Changed to 1 minute for faster detection
 		costSavingInterval: 10, // Fixed at 10 minutes per requirement 12.6
 		currentInterval:    initialInterval,
 		costSavingMode:     costSavingMode,
@@ -212,7 +212,7 @@ func (ap *AdaptivePolling) GetNormalInterval() int {
 // GetReducedInterval returns the reduced polling interval in minutes.
 //
 // Returns:
-//   - int: Reduced polling interval in minutes (always 5)
+//   - int: Reduced polling interval in minutes (always 1)
 func (ap *AdaptivePolling) GetReducedInterval() int {
 	return ap.reducedInterval
 }
