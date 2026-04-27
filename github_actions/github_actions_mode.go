@@ -566,7 +566,7 @@ func (gam *GitHubActionsMode) CreateChannelConfigWithQuality(username, site stri
 		Framerate:   30,  // Default framerate (will be overridden by quality selector)
 		Resolution:  1080, // Default resolution (will be overridden by quality selector)
 		Pattern:     "videos/{{if ne .Site \"chaturbate\"}}{{.Site}}/{{end}}{{.Username}}_{{.Year}}-{{.Month}}-{{.Day}}_{{.Hour}}-{{.Minute}}-{{.Second}}{{if .Sequence}}_{{.Sequence}}{{end}}",
-		MaxDuration: 30, // Split into 30-minute segments to enable background uploads
+		MaxDuration: 60, // Split into 1-hour segments to enable background uploads
 		MaxFilesize: 0,  // No filesize limit by default
 	}
 	
