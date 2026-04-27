@@ -95,6 +95,11 @@ func (ch *Channel) Monitor(runID uint64) {
 				notifier.Default.ResetCooldown(fmt.Sprintf(notifier.KeyCFChannel, ch.Config.Username))
 			}
 
+			// Don't log context cancellation as an error (user intentionally paused)
+			if errors.Is(err, context.Canceled) {
+				return
+			}
+
 			if errors.Is(err, internal.ErrStreamEnded) {
 				ch.Info("stream ended, checking again in 10s")
 			} else if errors.Is(err, internal.ErrChannelOffline) {
@@ -130,8 +135,6 @@ func (ch *Channel) Monitor(runID uint64) {
 				ch.Info("age verification required; pass cookies with `-cookies` to authenticate, try again in %d min(s)", server.Config.Interval)
 			} else if errors.Is(err, internal.ErrRoomPasswordRequired) {
 				ch.Info("room requires a password, try again in %d min(s)", server.Config.Interval)
-			} else if errors.Is(err, context.Canceled) {
-				// ...
 			} else {
 				ch.Error("on retry: %s: retrying in 10s", err.Error())
 			}
@@ -160,7 +163,7 @@ func (ch *Channel) Monitor(runID uint64) {
 		if err = retry.Do(
 			pipeline,
 			retry.Context(ctx),
-			retry.Attempts(0),
+			retry.Attempts(1000), // Cap at 1000 attempts to prevent infinite loops
 			retry.DelayType(delayFn),
 			retry.OnRetry(onRetry),
 		); err != nil {
@@ -321,18 +324,18 @@ func (ch *Channel) RecordStream(ctx context.Context, runID uint64, s site.Site, 
 // monitor run, ignoring stale late-arriving segments from older runs.
 func (ch *Channel) handleSegmentForMonitor(runID uint64, b []byte, duration float64) error {
 	ch.fileMu.Lock()
+	defer ch.fileMu.Unlock()
+	
 	ch.monitorMu.Lock()
 	isPaused := ch.Config.IsPaused
 	isCurrentRun := ch.monitorRunID == runID
 	ch.monitorMu.Unlock()
 
 	if isPaused || !isCurrentRun {
-		ch.fileMu.Unlock()
 		return retry.Unrecoverable(internal.ErrPaused)
 	}
 
 	if ch.File == nil {
-		ch.fileMu.Unlock()
 		return fmt.Errorf("write file: no active file")
 	}
 
@@ -342,7 +345,6 @@ func (ch *Channel) handleSegmentForMonitor(runID uint64, b []byte, duration floa
 	if ch.FileExt == ".mp4" && ch.Filesize == 0 && !isMP4InitSegment(b) && len(ch.mp4InitSegment) > 0 {
 		n, err := ch.File.Write(ch.mp4InitSegment)
 		if err != nil {
-			ch.fileMu.Unlock()
 			return fmt.Errorf("write mp4 init segment: %w", err)
 		}
 		ch.Filesize += int64(n)
@@ -356,7 +358,6 @@ func (ch *Channel) handleSegmentForMonitor(runID uint64, b []byte, duration floa
 
 	n, err := ch.File.Write(b)
 	if err != nil {
-		ch.fileMu.Unlock()
 		return fmt.Errorf("write file: %w", err)
 	}
 
@@ -364,9 +365,9 @@ func (ch *Channel) handleSegmentForMonitor(runID uint64, b []byte, duration floa
 	ch.Duration += duration
 	ch.segmentCount++
 	
-	// CRITICAL FIX: Sync every 5 segments (~5 seconds) instead of 10 to minimize corruption
-	// This ensures data is written to disk more frequently, reducing data loss on crashes
-	if ch.segmentCount%5 == 0 {
+	// CRITICAL FIX: Sync every 3 segments (~3 seconds) to minimize data loss on crashes
+	// This ensures data is written to disk more frequently, reducing corruption risk
+	if ch.segmentCount%3 == 0 {
 		if err := ch.File.Sync(); err != nil && !errors.Is(err, os.ErrClosed) {
 			// Log but don't fail - sync is best-effort for crash protection
 			ch.Error("periodic sync failed (segment %d): %v", ch.segmentCount, err)
@@ -380,23 +381,19 @@ func (ch *Channel) handleSegmentForMonitor(runID uint64, b []byte, duration floa
 	var newFilename string
 	if shouldSwitch {
 		if err := ch.cleanupLocked(); err != nil {
-			ch.fileMu.Unlock()
 			return fmt.Errorf("next file: %w", err)
 		}
 		filename, err := ch.generateFilenameLocked()
 		if err != nil {
-			ch.fileMu.Unlock()
 			return err
 		}
 		if err := ch.createNewFileLocked(filename, ch.FileExt); err != nil {
-			ch.fileMu.Unlock()
 			return fmt.Errorf("next file: %w", err)
 		}
 		ch.Sequence++
 		ch.segmentCount = 0 // Reset counter for new file
 		newFilename = ch.File.Name()
 	}
-	ch.fileMu.Unlock()
 
 	if os.Getenv("GITHUB_ACTIONS") == "true" {
 		// Live streams have no predetermined length, so a percentage progress bar is misleading.

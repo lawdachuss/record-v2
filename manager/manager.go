@@ -2,8 +2,10 @@ package manager
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -26,9 +28,11 @@ type Manager struct {
 	Channels sync.Map
 	SSE      *sse.Server
 
-	startTime  time.Time
-	cfBlocksMu sync.Mutex
-	cfBlocks   map[string]time.Time // username -> last CF block time
+	startTime      time.Time
+	cfBlocksMu     sync.Mutex
+	cfBlocks       map[string]time.Time // username -> last CF block time
+	shutdownCtx    context.Context
+	shutdownCancel context.CancelFunc
 }
 
 type filenamePatternData struct {
@@ -52,23 +56,19 @@ func New() (*Manager, error) {
 	updateStream := server.CreateStream("updates")
 	updateStream.AutoReplay = false
 
-	m := &Manager{SSE: server}
-	m.startTime = time.Now()
-	m.cfBlocks = make(map[string]time.Time)
-	go m.diskMonitor()
+	ctx, cancel := context.WithCancel(context.Background())
+	m := &Manager{
+		SSE:            server,
+		startTime:      time.Now(),
+		cfBlocks:       make(map[string]time.Time),
+		shutdownCtx:    ctx,
+		shutdownCancel: cancel,
+	}
+	go m.diskMonitor(ctx)
 
 	// Send a heartbeat event every 30s so browsers can detect a stale connection
 	// and the SSE extension will reconnect automatically.
-	go func() {
-		ticker := time.NewTicker(30 * time.Second)
-		defer ticker.Stop()
-		for range ticker.C {
-			server.Publish("updates", &sse.Event{
-				Event: []byte("heartbeat"),
-				Data:  []byte(""),
-			})
-		}
-	}()
+	go m.heartbeat(ctx)
 
 	return m, nil
 }
@@ -132,8 +132,15 @@ func SaveSettings() error {
 	if err := os.MkdirAll("./conf", 0700); err != nil {
 		return fmt.Errorf("mkdir conf: %w", err)
 	}
-	if err := os.WriteFile(settingsFile, b, 0600); err != nil {
+	
+	// Atomic write: write to temp file, then rename
+	tempFile := settingsFile + ".tmp"
+	if err := os.WriteFile(tempFile, b, 0600); err != nil {
 		return fmt.Errorf("write settings: %w", err)
+	}
+	if err := os.Rename(tempFile, settingsFile); err != nil {
+		os.Remove(tempFile)
+		return fmt.Errorf("rename settings: %w", err)
 	}
 	return nil
 }
@@ -221,6 +228,16 @@ func LoadSettings() error {
 }
 
 func renderPatternSample(conf *entity.ChannelConfig) (string, error) {
+	// Validate pattern length to prevent DoS
+	if len(conf.Pattern) > 500 {
+		return "", fmt.Errorf("filename pattern too long (max 500 characters)")
+	}
+	
+	// Validate pattern doesn't contain dangerous template functions
+	if strings.Contains(conf.Pattern, "{{call") || strings.Contains(conf.Pattern, "{{define") {
+		return "", fmt.Errorf("filename pattern contains forbidden template functions")
+	}
+	
 	tpl, err := template.New("filename").Parse(conf.Pattern)
 	if err != nil {
 		return "", fmt.Errorf("filename pattern error for %s (%s): %w", conf.Username, conf.Site, err)
@@ -345,8 +362,15 @@ func (m *Manager) SaveConfig() error {
 	if err := os.MkdirAll("./conf", 0700); err != nil {
 		return fmt.Errorf("mkdir all conf: %w", err)
 	}
-	if err := os.WriteFile(channelsFile, b, 0600); err != nil {
+	
+	// Atomic write: write to temp file, then rename
+	tempFile := channelsFile + ".tmp"
+	if err := os.WriteFile(tempFile, b, 0600); err != nil {
 		return fmt.Errorf("write file: %w", err)
+	}
+	if err := os.Rename(tempFile, channelsFile); err != nil {
+		os.Remove(tempFile)
+		return fmt.Errorf("rename file: %w", err)
 	}
 	return nil
 }
@@ -359,8 +383,15 @@ func saveChannelConfig(config []*entity.ChannelConfig) error {
 	if err := os.MkdirAll("./conf", 0700); err != nil {
 		return fmt.Errorf("mkdir all conf: %w", err)
 	}
-	if err := os.WriteFile(channelsFile, b, 0600); err != nil {
+	
+	// Atomic write: write to temp file, then rename
+	tempFile := channelsFile + ".tmp"
+	if err := os.WriteFile(tempFile, b, 0600); err != nil {
 		return fmt.Errorf("write file: %w", err)
+	}
+	if err := os.Rename(tempFile, channelsFile); err != nil {
+		os.Remove(tempFile)
+		return fmt.Errorf("rename file: %w", err)
 	}
 	return nil
 }
@@ -387,7 +418,9 @@ func (m *Manager) LoadConfig() error {
 
 	seen := make(map[string]struct{}, len(config))
 	for i, conf := range config {
-		conf.Sanitize()
+		if err := conf.Sanitize(); err != nil {
+			return fmt.Errorf("channel at index %d: %w", i, err)
+		}
 		if conf.Username == "" {
 			return fmt.Errorf("channel at index %d has empty username", i)
 		}
@@ -422,7 +455,9 @@ func (m *Manager) LoadConfig() error {
 
 // CreateChannel starts monitoring an M3U8 stream
 func (m *Manager) CreateChannel(conf *entity.ChannelConfig, shouldSave bool) error {
-	conf.Sanitize()
+	if err := conf.Sanitize(); err != nil {
+		return fmt.Errorf("sanitize config: %w", err)
+	}
 
 	if conf.Username == "" {
 		return fmt.Errorf("username is empty")
@@ -504,12 +539,13 @@ func (m *Manager) ResumeChannel(channelID string) error {
 func (m *Manager) ChannelInfo() []*entity.ChannelInfo {
 	var channels []*entity.ChannelInfo
 
-	// Iterate over the channels and append their information to the slice
+	// Collect all channels first (safe with sync.Map)
 	m.Channels.Range(func(key, value any) bool {
 		channels = append(channels, value.(*channel.Channel).ExportInfo())
 		return true
 	})
 
+	// Sort after collection is complete to avoid race conditions
 	sort.Slice(channels, func(i, j int) bool {
 		// First priority: Online channels
 		if channels[i].IsOnline != channels[j].IsOnline {
@@ -595,6 +631,9 @@ func (m *Manager) GetChannelLiveThumb(channelID string) string {
 // Shutdown gracefully stops all active channels, saves config, and waits for
 // any recording finalization tasks to finish before returning.
 func (m *Manager) Shutdown() {
+	// Stop background goroutines first
+	m.shutdownCancel()
+	
 	m.Channels.Range(func(key, value any) bool {
 		ch := value.(*channel.Channel)
 		wasPaused := ch.Config.IsPaused
@@ -674,41 +713,64 @@ func (m *Manager) CheckDiskSpace() float64 {
 	return disk.Percent
 }
 
+// heartbeat sends periodic SSE heartbeat events to keep connections alive.
+func (m *Manager) heartbeat(ctx context.Context) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			m.SSE.Publish("updates", &sse.Event{
+				Event: []byte("heartbeat"),
+				Data:  []byte(""),
+			})
+		}
+	}
+}
+
 // diskMonitor runs every 5 minutes and fires notifications when disk usage
 // crosses the configured warning or critical thresholds.
-func (m *Manager) diskMonitor() {
+func (m *Manager) diskMonitor(ctx context.Context) {
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
-	for range ticker.C {
-		recPath := recordingDir(server.Config.Pattern)
-		disk, err := getDiskStats(recPath)
-		if err != nil {
-			continue
-		}
-		pct := disk.Percent
-		critThresh := float64(server.Config.DiskCriticalPercent)
-		warnThresh := float64(server.Config.DiskWarningPercent)
-		if critThresh <= 0 {
-			critThresh = 90
-		}
-		if warnThresh <= 0 {
-			warnThresh = 80
-		}
-		usedGB := float64(disk.Used) / 1e9
-		totalGB := float64(disk.Total) / 1e9
-		msg := fmt.Sprintf("%.1f GB used of %.1f GB (%.0f%%)", usedGB, totalGB, pct)
-		if pct >= critThresh {
-			notifier.Notify(
-				fmt.Sprintf(notifier.KeyDiskCritical, recPath),
-				"🚨 Disk Space Critical",
-				msg,
-			)
-		} else if pct >= warnThresh {
-			notifier.Notify(
-				fmt.Sprintf(notifier.KeyDiskWarning, recPath),
-				"⚠️ Disk Space Warning",
-				msg,
-			)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			recPath := recordingDir(server.Config.Pattern)
+			disk, err := getDiskStats(recPath)
+			if err != nil {
+				log.Printf("WARN: disk stats failed for %s: %v", recPath, err)
+				continue
+			}
+			pct := disk.Percent
+			critThresh := float64(server.Config.DiskCriticalPercent)
+			warnThresh := float64(server.Config.DiskWarningPercent)
+			if critThresh <= 0 {
+				critThresh = 90
+			}
+			if warnThresh <= 0 {
+				warnThresh = 80
+			}
+			usedGB := float64(disk.Used) / 1e9
+			totalGB := float64(disk.Total) / 1e9
+			msg := fmt.Sprintf("%.1f GB used of %.1f GB (%.0f%%)", usedGB, totalGB, pct)
+			if pct >= critThresh {
+				notifier.Notify(
+					fmt.Sprintf(notifier.KeyDiskCritical, recPath),
+					"🚨 Disk Space Critical",
+					msg,
+				)
+			} else if pct >= warnThresh {
+				notifier.Notify(
+					fmt.Sprintf(notifier.KeyDiskWarning, recPath),
+					"⚠️ Disk Space Warning",
+					msg,
+				)
+			}
 		}
 	}
 }

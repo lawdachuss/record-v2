@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
+	"regexp"
 	"time"
 )
 
@@ -330,13 +332,27 @@ func (rch *RecordingCompletionHandler) HandleRecordingCompletion(
 // extractQualityFromFilename attempts to extract quality information from the filename.
 // This is a helper function that looks for common quality patterns in filenames.
 // Returns an empty string if quality cannot be determined.
+//
+// DEPRECATED: This function is a placeholder. Quality should be passed directly
+// from the recording engine via the channel configuration.
 func extractQualityFromFilename(filePath string) string {
-	// This is a placeholder implementation
-	// In a real implementation, this would parse the filename or use metadata
-	// from the recording process to determine the actual quality
+	// Parse filename for quality patterns like "2160p60", "1080p30", etc.
+	// Common patterns: username_YYYY-MM-DD_HH-MM-SS_2160p60.mp4
 	
-	// For now, return empty string to indicate unknown quality
-	// The actual quality should be passed from the recording engine
+	filename := filepath.Base(filePath)
+	
+	// Try to match patterns like "2160p60", "1080p30", "720p60", etc.
+	// Pattern: {resolution}p{framerate}
+	re := regexp.MustCompile(`(\d{3,4})p(\d{2})`)
+	matches := re.FindStringSubmatch(filename)
+	
+	if len(matches) >= 3 {
+		resolution := matches[1]
+		framerate := matches[2]
+		return fmt.Sprintf("%sp%s", resolution, framerate)
+	}
+	
+	// If no pattern found, return empty string
 	return ""
 }
 

@@ -22,15 +22,18 @@ import (
 
 // Pattern holds the date/time and sequence information for the filename pattern
 type Pattern struct {
-	Username string
-	Site     string
-	Year     string
-	Month    string
-	Day      string
-	Hour     string
-	Minute   string
-	Second   string
-	Sequence int
+	Username   string
+	Site       string
+	Year       string
+	Month      string
+	Day        string
+	Hour       string
+	Minute     string
+	Second     string
+	Sequence   int
+	Resolution int    // Resolution in pixels (e.g., 2160, 1080, 720)
+	Framerate  int    // Framerate in fps (e.g., 60, 30)
+	Quality    string // Quality string in format "{resolution}p{framerate}" (e.g., "2160p60")
 }
 
 // NextFile prepares the next file to be created, by cleaning up the last file and generating a new one.
@@ -120,16 +123,26 @@ func (ch *Channel) generateFilenameLocked() (string, error) {
 
 	// Get the current time based on the Unix timestamp when the stream was started
 	t := time.Unix(ch.StreamedAt, 0)
+	
+	// Generate quality string from resolution and framerate
+	quality := ""
+	if ch.Config.Resolution > 0 && ch.Config.Framerate > 0 {
+		quality = fmt.Sprintf("%dp%d", ch.Config.Resolution, ch.Config.Framerate)
+	}
+	
 	pattern := &Pattern{
-		Username: ch.Config.Username,
-		Site:     ch.Config.Site,
-		Sequence: ch.Sequence,
-		Year:     t.Format("2006"),
-		Month:    t.Format("01"),
-		Day:      t.Format("02"),
-		Hour:     t.Format("15"),
-		Minute:   t.Format("04"),
-		Second:   t.Format("05"),
+		Username:   ch.Config.Username,
+		Site:       ch.Config.Site,
+		Sequence:   ch.Sequence,
+		Year:       t.Format("2006"),
+		Month:      t.Format("01"),
+		Day:        t.Format("02"),
+		Hour:       t.Format("15"),
+		Minute:     t.Format("04"),
+		Second:     t.Format("05"),
+		Resolution: ch.Config.Resolution,
+		Framerate:  ch.Config.Framerate,
+		Quality:    quality,
 	}
 
 	if err := tpl.Execute(&buf, pattern); err != nil {
@@ -147,10 +160,20 @@ func (ch *Channel) CreateNewFile(filename, ext string) error {
 }
 
 func (ch *Channel) createNewFileLocked(filename, ext string) error {
-
+	dir := filepath.Dir(filename)
+	
 	// Ensure the directory exists before creating the file
-	if err := os.MkdirAll(filepath.Dir(filename), 0755); err != nil {
+	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("mkdir all: %w", err)
+	}
+	
+	// Verify and fix permissions if directory exists with wrong permissions
+	if info, err := os.Stat(dir); err == nil {
+		if info.Mode().Perm() != 0755 {
+			if err := os.Chmod(dir, 0755); err != nil {
+				log.Printf("WARN: failed to fix directory permissions for %s: %v", dir, err)
+			}
+		}
 	}
 
 	// Open the file in append mode, create it if it doesn't exist
@@ -339,8 +362,14 @@ func moveRecordingToDir(src, recordingRoot, completedDir string) (string, error)
 		return "", fmt.Errorf("rename completed file: %w", err)
 	}
 
-	if err := copyFile(src, dst); err != nil {
+	// Cross-device move: use atomic copy with temp file
+	tempDst := dst + ".tmp"
+	if err := copyFile(src, tempDst); err != nil {
 		return "", err
+	}
+	if err := os.Rename(tempDst, dst); err != nil {
+		os.Remove(tempDst)
+		return "", fmt.Errorf("atomic rename after copy: %w", err)
 	}
 	if err := os.Remove(src); err != nil {
 		return "", fmt.Errorf("remove source after copy: %w", err)
@@ -371,13 +400,28 @@ func copyFile(src, dst string) error {
 	}
 	defer out.Close()
 
-	if _, err := io.Copy(out, in); err != nil {
-		return fmt.Errorf("copy file: %w", err)
+	// Use a timeout for the copy operation to prevent hanging on network filesystems
+	done := make(chan error, 1)
+	go func() {
+		_, copyErr := io.Copy(out, in)
+		if copyErr != nil {
+			done <- fmt.Errorf("copy file: %w", copyErr)
+			return
+		}
+		if syncErr := out.Sync(); syncErr != nil {
+			done <- fmt.Errorf("sync destination file: %w", syncErr)
+			return
+		}
+		done <- nil
+	}()
+	
+	// Wait for copy with timeout
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(5 * time.Minute):
+		return fmt.Errorf("copy timeout after 5 minutes")
 	}
-	if err := out.Sync(); err != nil {
-		return fmt.Errorf("sync destination file: %w", err)
-	}
-	return nil
 }
 
 func (ch *Channel) runFFmpegFinalizer(filename string) (string, error) {

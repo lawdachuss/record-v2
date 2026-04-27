@@ -240,6 +240,11 @@ func (sp *StatePersister) VerifyIntegrity(manifest StateManifest) error {
 			return fmt.Errorf("file %s size mismatch: expected %d, got %d",
 				entry.Path, entry.Size, fileInfo.Size())
 		}
+		
+		// Check if cache entry is stale (older than 24 hours)
+		if time.Since(entry.Timestamp) > 24*time.Hour {
+			log.Printf("WARN: cache entry %s is stale (age: %v)", entry.Path, time.Since(entry.Timestamp))
+		}
 
 		// Calculate and verify checksum
 		checksum, err := calculateChecksum(filePath)
@@ -543,10 +548,23 @@ func copyFile(src, dst string) error {
 	}
 	defer destFile.Close()
 
-	if _, err := io.Copy(destFile, sourceFile); err != nil {
+	// Use a timeout for the copy operation to prevent hanging on network filesystems
+	done := make(chan error, 1)
+	go func() {
+		_, copyErr := io.Copy(destFile, sourceFile)
+		if copyErr != nil {
+			done <- copyErr
+			return
+		}
+		// Sync to ensure data is written to disk
+		done <- destFile.Sync()
+	}()
+	
+	// Wait for copy with timeout
+	select {
+	case err := <-done:
 		return err
+	case <-time.After(5 * time.Minute):
+		return fmt.Errorf("copy timeout after 5 minutes")
 	}
-
-	// Sync to ensure data is written to disk
-	return destFile.Sync()
 }

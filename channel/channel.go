@@ -358,7 +358,20 @@ func (ch *Channel) waitForFinalizations() int {
 
 	if pending > 0 {
 		ch.Info("waiting for %d recording finalization task(s)", pending)
-		ch.finalizeWG.Wait()
+		
+		// Add timeout to prevent indefinite blocking
+		done := make(chan struct{})
+		go func() {
+			ch.finalizeWG.Wait()
+			close(done)
+		}()
+		
+		select {
+		case <-done:
+			// Finalization completed successfully
+		case <-time.After(5 * time.Minute):
+			ch.Error("finalization timeout after 5 minutes, forcing shutdown")
+		}
 	}
 	return pending
 }

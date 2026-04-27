@@ -18,6 +18,7 @@ import (
 // Global shared CycleTLS client for thread-safe concurrent requests
 var (
 	globalCycleTLS     cycletls.CycleTLS
+	cycleTLSMu         sync.Mutex // Protects globalCycleTLS from concurrent access
 	cycleTLSOnce       sync.Once
 	cycleTLSInitialized bool
 )
@@ -244,7 +245,8 @@ func (h *Req) postWithCycleTLSReferer(ctx context.Context, url string, data stri
 		fmt.Printf("[DEBUG] CycleTLS POST data: %s\n", data)
 	}
 	
-	// Uses the global shared CycleTLS instance for thread-safe concurrent requests
+	// Uses the global shared CycleTLS instance with mutex protection
+	cycleTLSMu.Lock()
 	response, err := globalCycleTLS.Do(url, cycletls.Options{
 		Body:      data,
 		Ja3:       "771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53,0-23-65281-10-11-35-16-5-13-18-51-45-43-27-17513,29-23-24,0",
@@ -252,6 +254,7 @@ func (h *Req) postWithCycleTLSReferer(ctx context.Context, url string, data stri
 		Headers:   headers,
 		Timeout:   10,
 	}, "POST")
+	cycleTLSMu.Unlock()
 	
 	if err != nil {
 		return "", fmt.Errorf("cycletls post: %w", err)
@@ -339,19 +342,25 @@ func (h *Req) GetBytes(ctx context.Context, url string) ([]byte, error) {
 		return nil, fmt.Errorf("read body: %w", err)
 	}
 
-	// Check for Cloudflare protection
-	if strings.Contains(string(b), "<title>Just a moment...</title>") {
-		if server.Config.Debug {
-			fmt.Printf("[DEBUG] CF response for %s (status %d)\n", req.URL, resp.StatusCode)
-			tmpFile, ferr := os.CreateTemp("", "chaturbate-debug-cf-*.html")
-			if ferr == nil {
-				if _, werr := tmpFile.Write(b); werr == nil {
-					fmt.Printf("[DEBUG]   Full body written to: %s\n", tmpFile.Name())
+	// Check for Cloudflare protection - multiple indicators
+	if resp.StatusCode == 403 || resp.StatusCode == 503 {
+		bodyStr := string(b)
+		if strings.Contains(bodyStr, "<title>Just a moment...</title>") ||
+			strings.Contains(bodyStr, "Just a moment") ||
+			strings.Contains(bodyStr, "cloudflare") ||
+			resp.Header.Get("Server") == "cloudflare" {
+			if server.Config.Debug {
+				fmt.Printf("[DEBUG] CF response for %s (status %d)\n", req.URL, resp.StatusCode)
+				tmpFile, ferr := os.CreateTemp("", "chaturbate-debug-cf-*.html")
+				if ferr == nil {
+					if _, werr := tmpFile.Write(b); werr == nil {
+						fmt.Printf("[DEBUG]   Full body written to: %s\n", tmpFile.Name())
+					}
+					tmpFile.Close()
 				}
-				tmpFile.Close()
 			}
+			return nil, ErrCloudflareBlocked
 		}
-		return nil, ErrCloudflareBlocked
 	}
 	// Check for Age Verification
 	if strings.Contains(string(b), "Verify your age") {
@@ -483,8 +492,19 @@ func ParseCookies(cookieStr string) map[string]string {
 			// Trim spaces around key and value
 			key := strings.TrimSpace(parts[0])
 			value := strings.TrimSpace(parts[1])
+			
+			// Validate cookie format
+			if key == "" || value == "" {
+				if server.Config.Debug {
+					fmt.Printf("[WARN] Invalid cookie format (empty key or value): %s\n", pair)
+				}
+				continue
+			}
+			
 			// Store cookie name and value in the map
 			cookies[key] = value
+		} else if server.Config.Debug {
+			fmt.Printf("[WARN] Invalid cookie format (missing =): %s\n", pair)
 		}
 	}
 	return cookies
@@ -553,7 +573,8 @@ func (h *Req) GetBytesWithCycleTLS(ctx context.Context, url string) ([]byte, err
 	
 	// Make request with CycleTLS using Chrome 120 profile
 	// This spoofs Chrome's TLS/HTTP2 fingerprint to bypass Cloudflare
-	// Uses the global shared CycleTLS instance for thread-safe concurrent requests
+	// Uses the global shared CycleTLS instance with mutex protection
+	cycleTLSMu.Lock()
 	response, err := globalCycleTLS.Do(url, cycletls.Options{
 		Body:      "",
 		Ja3:       "771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53,0-23-65281-10-11-35-16-5-13-18-51-45-43-27-17513,29-23-24,0",
@@ -561,6 +582,7 @@ func (h *Req) GetBytesWithCycleTLS(ctx context.Context, url string) ([]byte, err
 		Headers:   headers,
 		Timeout:   10,
 	}, "GET")
+	cycleTLSMu.Unlock()
 	
 	if err != nil {
 		return nil, fmt.Errorf("cycletls request: %w", err)
@@ -576,19 +598,24 @@ func (h *Req) GetBytesWithCycleTLS(ctx context.Context, url string) ([]byte, err
 	
 	body := []byte(response.Body)
 	
-	// Check for Cloudflare protection
-	if strings.Contains(response.Body, "<title>Just a moment...</title>") {
-		if server.Config.Debug {
-			fmt.Printf("[DEBUG] CF response for %s (status %d)\n", url, response.Status)
-			tmpFile, ferr := os.CreateTemp("", "chaturbate-debug-cf-*.html")
-			if ferr == nil {
-				if _, werr := tmpFile.Write(body); werr == nil {
-					fmt.Printf("[DEBUG]   Full body written to: %s\n", tmpFile.Name())
+	// Check for Cloudflare protection - multiple indicators
+	if response.Status == 403 || response.Status == 503 {
+		bodyStr := response.Body
+		if strings.Contains(bodyStr, "<title>Just a moment...</title>") ||
+			strings.Contains(bodyStr, "Just a moment") ||
+			strings.Contains(bodyStr, "cloudflare") {
+			if server.Config.Debug {
+				fmt.Printf("[DEBUG] CF response for %s (status %d)\n", url, response.Status)
+				tmpFile, ferr := os.CreateTemp("", "chaturbate-debug-cf-*.html")
+				if ferr == nil {
+					if _, werr := tmpFile.Write(body); werr == nil {
+						fmt.Printf("[DEBUG]   Full body written to: %s\n", tmpFile.Name())
+					}
+					tmpFile.Close()
 				}
-				tmpFile.Close()
 			}
+			return nil, ErrCloudflareBlocked
 		}
-		return nil, ErrCloudflareBlocked
 	}
 	
 	// Check for Age Verification

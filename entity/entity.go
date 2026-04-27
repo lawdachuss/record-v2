@@ -3,6 +3,7 @@ package entity
 import (
 	"regexp"
 	"strings"
+	"fmt"
 )
 
 // Event represents the type of event for the channel.
@@ -33,10 +34,14 @@ type ChannelConfig struct {
 	StreamedAt       int64  `json:"streamed_at,omitempty"`
 }
 
-func (c *ChannelConfig) Sanitize() {
+func (c *ChannelConfig) Sanitize() error {
 	c.Username = regexp.MustCompile(`[^a-zA-Z0-9_-]`).ReplaceAllString(c.Username, "")
 	c.Username = strings.TrimSpace(c.Username)
+	if c.Username == "" {
+		return fmt.Errorf("username cannot be empty after sanitization")
+	}
 	c.Site = NormalizeSite(c.Site)
+	return nil
 }
 
 // NormalizeSite returns a supported site name, defaulting to Chaturbate.
