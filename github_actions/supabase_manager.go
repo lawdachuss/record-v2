@@ -317,3 +317,41 @@ func (sm *SupabaseManager) TestConnection() error {
 
 	return nil
 }
+
+// CheckRecordingExists checks if a recording with similar characteristics already exists.
+// This is used to prevent duplicate uploads during emergency shutdown scenarios.
+//
+// Parameters:
+//   - date: The date in YYYY-MM-DD format
+//   - fileSizeBytes: The file size in bytes
+//   - tolerancePercent: Tolerance percentage for file size matching (e.g., 1 for 1%)
+//
+// Returns:
+//   - The existing recording if found, nil otherwise
+//   - An error if the query fails
+func (sm *SupabaseManager) CheckRecordingExists(date string, fileSizeBytes int64, tolerancePercent int) (*SupabaseRecording, error) {
+	// Get all recordings for this date
+	recordings, err := sm.GetRecordingsByDate(date)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query recordings by date: %w", err)
+	}
+
+	// Calculate tolerance
+	tolerance := fileSizeBytes * int64(tolerancePercent) / 100
+
+	// Check if any recording matches the file size within tolerance
+	for _, rec := range recordings {
+		sizeDiff := rec.FileSizeBytes - fileSizeBytes
+		if sizeDiff < 0 {
+			sizeDiff = -sizeDiff
+		}
+		
+		if sizeDiff <= tolerance {
+			// Found a matching recording
+			return &rec, nil
+		}
+	}
+
+	// No matching recording found
+	return nil, nil
+}

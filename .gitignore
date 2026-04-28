@@ -3,3 +3,6 @@ goondvr
 conf
 bin
 .env
+database/*
+!database/.gitkeep
+!database/README.md

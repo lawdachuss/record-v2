@@ -979,6 +979,42 @@ func (gam *GitHubActionsMode) UploadCompletedRecordings(ctx context.Context, rec
 		default:
 		}
 		
+		// Check if this file was already uploaded by checking Supabase
+		// Extract file info to check against database
+		fileInfo, err := entry.Info()
+		if err != nil {
+			log.Printf("[UploadCompletedRecordings] Failed to get file info for %s: %v", name, err)
+			errorCount++
+			continue
+		}
+		
+		// Check if recording already exists in Supabase by file size and approximate timestamp
+		// This prevents duplicate uploads during emergency shutdown
+		if gam.SupabaseManager != nil {
+			log.Printf("[UploadCompletedRecordings] Checking if %s was already uploaded (size: %d bytes)...", name, fileInfo.Size())
+			
+			// Get file modification time as a proxy for recording time
+			modTime := fileInfo.ModTime()
+			date := modTime.Format("2006-01-02")
+			
+			// Check for existing recording with similar file size (1% tolerance)
+			existingRec, err := gam.SupabaseManager.CheckRecordingExists(date, fileInfo.Size(), 1)
+			if err != nil {
+				log.Printf("[UploadCompletedRecordings] Warning: Failed to check for duplicates in Supabase: %v", err)
+				// Continue with upload if we can't check - better to have duplicates than lose recordings
+			} else if existingRec != nil {
+				log.Printf("[UploadCompletedRecordings] SKIPPING %s - already uploaded (Supabase ID: %s, size: %d bytes)", name, existingRec.ID, existingRec.FileSizeBytes)
+				
+				// Delete the local file since it's already uploaded
+				if err := os.Remove(filePath); err != nil {
+					log.Printf("[UploadCompletedRecordings] Warning: Failed to delete duplicate file %s: %v", filePath, err)
+				} else {
+					log.Printf("[UploadCompletedRecordings] Deleted duplicate local file: %s", filePath)
+				}
+				continue
+			}
+		}
+		
 		// Upload the file
 		log.Printf("[UploadCompletedRecordings] Uploading %s...", name)
 		uploadResult, err := gam.StorageUploader.UploadRecording(ctx, filePath)
@@ -991,9 +1027,46 @@ func (gam *GitHubActionsMode) UploadCompletedRecordings(ctx context.Context, rec
 		log.Printf("[UploadCompletedRecordings] Successfully uploaded %s", name)
 		log.Printf("  - Gofile URL: %s", uploadResult.GofileURL)
 		log.Printf("  - Filester URL: %s", uploadResult.FilesterURL)
+		
+		// Add recording metadata to Supabase (if available)
+		if gam.SupabaseManager != nil {
+			// Parse filename to extract metadata
+			// Filename format: username_YYYY-MM-DD_HH-MM-SS[_sequence][_quality].ext
+			// For emergency uploads, we may not have all metadata, so we'll use file info
+			modTime := fileInfo.ModTime()
+			
+			supabaseRecording := SupabaseRecording{
+				Site:           "unknown", // Can't determine from filename alone
+				Channel:        "unknown", // Can't determine from filename alone
+				Timestamp:      modTime,
+				Date:           modTime.Format("2006-01-02"),
+				DurationSec:    0, // Unknown for emergency uploads
+				FileSizeBytes:  fileInfo.Size(),
+				Quality:        "unknown",
+				GofileURL:      uploadResult.GofileURL,
+				FilesterURL:    uploadResult.FilesterURL,
+				FilesterChunks: uploadResult.FilesterChunks,
+				SessionID:      gam.SessionID,
+				MatrixJob:      gam.MatrixJobID,
+			}
+			
+			insertedRecord, err := gam.SupabaseManager.InsertRecording(supabaseRecording)
+			if err != nil {
+				log.Printf("[UploadCompletedRecordings] Warning: Failed to add recording to Supabase: %v", err)
+				// Continue even if Supabase insert fails - recording is uploaded
+			} else {
+				log.Printf("[UploadCompletedRecordings] Recording added to Supabase (ID: %s)", insertedRecord.ID)
+			}
+		}
+		
 		uploadCount++
 		
-		// Note: StorageUploader.UploadRecording already deletes the file after successful upload
+		// Delete the local file after successful upload
+		if err := os.Remove(filePath); err != nil {
+			log.Printf("[UploadCompletedRecordings] Warning: Failed to delete local file %s: %v", filePath, err)
+		} else {
+			log.Printf("[UploadCompletedRecordings] Deleted local file: %s", filePath)
+		}
 	}
 	
 	log.Printf("[UploadCompletedRecordings] Upload complete: %d successful, %d failed", uploadCount, errorCount)
